@@ -51,6 +51,10 @@ import {
   requireOpenCodeModelId,
 } from "./models.js";
 import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/server-utils";
+import {
+  prepareMcpWorkspaceConfig,
+  readResolvedMcpServers,
+} from "@paperclipai/adapter-utils/mcp-bundle";
 import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
@@ -547,6 +551,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionHandoffChars: sessionHandoffNote.length,
       heartbeatPromptChars: renderedPrompt.length,
     };
+
+    const resolvedMcpServers = readResolvedMcpServers(config);
+    await prepareMcpWorkspaceConfig({
+      adapter: "opencode",
+      workspaceCwd: cwd,
+      resolvedServers: resolvedMcpServers,
+      onLog,
+    });
 
     const buildArgs = (resumeSessionId: string | null) => {
       const args = ["run", "--format", "json"];
