@@ -472,6 +472,7 @@ export const SECRET_BINDING_TARGET_TYPES = [
   "issue",
   "run",
   "system",
+  "mcp_server",
 ] as const;
 export type SecretBindingTargetType = (typeof SECRET_BINDING_TARGET_TYPES)[number];
 
@@ -660,6 +661,7 @@ export const PERMISSION_KEYS = [
   "tasks:assign_scope",
   "tasks:manage_active_checkouts",
   "joins:approve",
+  "mcp:manage",
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 

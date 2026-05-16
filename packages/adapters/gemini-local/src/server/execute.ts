@@ -56,6 +56,10 @@ import {
   parseGeminiJsonl,
 } from "./parse.js";
 import { firstNonEmptyLine } from "./utils.js";
+import {
+  prepareMcpWorkspaceConfig,
+  readResolvedMcpServers,
+} from "@paperclipai/adapter-utils/mcp-bundle";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -502,6 +506,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     runtimeNoteChars: paperclipEnvNote.length + apiAccessNote.length,
     heartbeatPromptChars: renderedPrompt.length,
   };
+
+  const resolvedMcpServers = readResolvedMcpServers(config);
+  await prepareMcpWorkspaceConfig({
+    adapter: "gemini",
+    workspaceCwd: cwd,
+    resolvedServers: resolvedMcpServers,
+    onLog,
+  });
 
   const buildArgs = (resumeSessionId: string | null) => {
     const args = ["--output-format", "stream-json"];

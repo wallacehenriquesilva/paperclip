@@ -47,6 +47,10 @@ import {
 import { pathExists, prepareManagedCodexHome, resolveManagedCodexHomeDir, resolveSharedCodexHomeDir } from "./codex-home.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
+import {
+  buildCodexCliOverrideFlags,
+  readResolvedMcpServers,
+} from "@paperclipai/adapter-utils/mcp-bundle";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -677,6 +681,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     heartbeatPromptChars: renderedPrompt.length,
   };
 
+  const resolvedMcpServers = readResolvedMcpServers(config);
+  const mcpOverrideFlags = buildCodexCliOverrideFlags(resolvedMcpServers);
+  if (mcpOverrideFlags.length > 0) {
+    await onLog(
+      "stdout",
+      `[paperclip] Injecting ${resolvedMcpServers.length} MCP server${resolvedMcpServers.length === 1 ? "" : "s"} into Codex via -c overrides.\n`,
+    );
+  }
+
+  function findStdinMarkerIndex(args: readonly string[]): number {
+    for (let i = args.length - 1; i >= 0; i -= 1) {
+      if (args[i] === "-") return i;
+    }
+    return args.length;
+  }
+
   const runAttempt = async (resumeSessionId: string | null) => {
     const execArgs = buildCodexExecArgs(
       forceSaferInvocation ? { ...config, fastMode: false } : config,
@@ -685,7 +705,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         skipGitRepoCheck: executionTargetIsSandbox,
       },
     );
-    const args = execArgs.args;
+    let args: string[];
+    if (mcpOverrideFlags.length === 0) {
+      args = execArgs.args;
+    } else {
+      const markerIndex = findStdinMarkerIndex(execArgs.args);
+      args = [
+        ...execArgs.args.slice(0, markerIndex),
+        ...mcpOverrideFlags,
+        ...execArgs.args.slice(markerIndex),
+      ];
+    }
     const commandNotesWithFastMode =
       execArgs.fastModeIgnoredReason == null
         ? commandNotes

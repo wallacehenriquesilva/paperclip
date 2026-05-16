@@ -45,6 +45,7 @@ interface CompanyExportOptions extends BaseClientOptions {
   out?: string;
   include?: string;
   skills?: string;
+  mcpServers?: string;
   projects?: string;
   issues?: string;
   projectIssues?: string;
@@ -84,6 +85,7 @@ const DEFAULT_EXPORT_INCLUDE: CompanyPortabilityInclude = {
   projects: false,
   issues: false,
   skills: false,
+  mcpServers: false,
 };
 
 const DEFAULT_IMPORT_INCLUDE: CompanyPortabilityInclude = {
@@ -92,6 +94,7 @@ const DEFAULT_IMPORT_INCLUDE: CompanyPortabilityInclude = {
   projects: true,
   issues: true,
   skills: true,
+  mcpServers: true,
 };
 
 const IMPORT_INCLUDE_OPTIONS: Array<{
@@ -104,6 +107,7 @@ const IMPORT_INCLUDE_OPTIONS: Array<{
   { value: "issues", label: "Tasks", hint: "tasks and recurring routines" },
   { value: "agents", label: "Agents", hint: "agent records and org structure" },
   { value: "skills", label: "Skills", hint: "company skill packages and references" },
+  { value: "mcpServers", label: "MCP servers", hint: "Model Context Protocol server definitions" },
 ];
 
 const IMPORT_PREVIEW_SAMPLE_LIMIT = 6;
@@ -165,9 +169,17 @@ function parseInclude(
     projects: values.includes("projects"),
     issues: values.includes("issues") || values.includes("tasks"),
     skills: values.includes("skills"),
+    mcpServers: values.includes("mcp-servers") || values.includes("mcpservers"),
   };
-  if (!include.company && !include.agents && !include.projects && !include.issues && !include.skills) {
-    throw new Error("Invalid --include value. Use one or more of: company,agents,projects,issues,tasks,skills");
+  if (
+    !include.company
+    && !include.agents
+    && !include.projects
+    && !include.issues
+    && !include.skills
+    && !include.mcpServers
+  ) {
+    throw new Error("Invalid --include value. Use one or more of: company,agents,projects,issues,tasks,skills,mcp-servers");
   }
   return include;
 }
@@ -1215,8 +1227,9 @@ export function registerCompanyCommands(program: Command): void {
       .description("Export a company into a portable markdown package")
       .argument("<companyId>", "Company ID")
       .requiredOption("--out <path>", "Output directory")
-      .option("--include <values>", "Comma-separated include set: company,agents,projects,issues,tasks,skills", "company,agents")
+      .option("--include <values>", "Comma-separated include set: company,agents,projects,issues,tasks,skills,mcp-servers", "company,agents")
       .option("--skills <values>", "Comma-separated skill slugs/keys to export")
+      .option("--mcp-servers <values>", "Comma-separated MCP server keys to export")
       .option("--projects <values>", "Comma-separated project shortnames/ids to export")
       .option("--issues <values>", "Comma-separated issue identifiers/ids to export")
       .option("--project-issues <values>", "Comma-separated project shortnames/ids whose issues should be exported")
@@ -1230,6 +1243,7 @@ export function registerCompanyCommands(program: Command): void {
             {
               include,
               skills: parseCsvValues(opts.skills),
+              mcpServers: parseCsvValues(opts.mcpServers),
               projects: parseCsvValues(opts.projects),
               issues: parseCsvValues(opts.issues),
               projectIssues: parseCsvValues(opts.projectIssues),
@@ -1268,7 +1282,7 @@ export function registerCompanyCommands(program: Command): void {
       .command("import")
       .description("Import a portable markdown company package from local path, URL, or GitHub")
       .argument("<fromPathOrUrl>", "Source path or URL")
-      .option("--include <values>", "Comma-separated include set: company,agents,projects,issues,tasks,skills")
+      .option("--include <values>", "Comma-separated include set: company,agents,projects,issues,tasks,skills,mcp-servers")
       .option("--target <mode>", "Target mode: new | existing")
       .option("-C, --company-id <id>", "Existing target company ID")
       .option("--new-company-name <name>", "Name override for --target new")

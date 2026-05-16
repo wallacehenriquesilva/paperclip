@@ -14,6 +14,7 @@ export const portabilityIncludeSchema = z
     projects: z.boolean().optional(),
     issues: z.boolean().optional(),
     skills: z.boolean().optional(),
+    mcpServers: z.boolean().optional(),
   })
   .partial();
 
@@ -227,6 +228,7 @@ export const companyPortabilityExportSchema = z.object({
   include: portabilityIncludeSchema.optional(),
   agents: z.array(z.string().min(1)).optional(),
   skills: z.array(z.string().min(1)).optional(),
+  mcpServers: z.array(z.string().min(1)).optional(),
   projects: z.array(z.string().min(1)).optional(),
   issues: z.array(z.string().min(1)).optional(),
   projectIssues: z.array(z.string().min(1)).optional(),

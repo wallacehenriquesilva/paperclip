@@ -413,6 +413,9 @@ function generateReadmeFromSelection(
     // Skill files live under skills/{key}/...
     return [...checkedFiles].some((f) => f.startsWith(`skills/${s.key}/`) || f.startsWith(`skills/`) && f.includes(`/${s.slug}/`));
   });
+  const mcpServers = manifest.mcpServers.filter((m) =>
+    [...checkedFiles].some((f) => f.startsWith(`mcp-servers/${m.key}/`)),
+  );
 
   const lines: string[] = [];
   lines.push(`# ${companyName}`);
@@ -436,6 +439,7 @@ function generateReadmeFromSelection(
   if (agents.length > 0) counts.push(["Agents", agents.length]);
   if (projects.length > 0) counts.push(["Projects", projects.length]);
   if (skills.length > 0) counts.push(["Skills", skills.length]);
+  if (mcpServers.length > 0) counts.push(["MCP servers", mcpServers.length]);
   if (tasks.length > 0) counts.push(["Tasks", tasks.length]);
 
   if (counts.length > 0) {
@@ -680,7 +684,7 @@ export function CompanyExport() {
   const exportPreviewMutation = useMutation({
     mutationFn: () =>
       companiesApi.exportPreview(selectedCompanyId!, {
-        include: { company: true, agents: true, projects: true, issues: true },
+        include: { company: true, agents: true, projects: true, issues: true, mcpServers: true },
         sidebarOrder,
       }),
     onSuccess: (result) => {
@@ -728,7 +732,7 @@ export function CompanyExport() {
   const downloadMutation = useMutation({
     mutationFn: () =>
       companiesApi.exportBundle(selectedCompanyId!, {
-        include: { company: true, agents: true, projects: true, issues: true },
+        include: { company: true, agents: true, projects: true, issues: true, mcpServers: true },
         selectedFiles: Array.from(checkedFiles).sort(),
         sidebarOrder,
       }),

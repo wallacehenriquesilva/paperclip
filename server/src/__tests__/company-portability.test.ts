@@ -56,6 +56,14 @@ const companySkillSvc = {
   importPackageFiles: vi.fn(),
 };
 
+const companyMcpServerSvc = {
+  list: vi.fn().mockResolvedValue([]),
+  getById: vi.fn(),
+  getByKey: vi.fn(),
+  create: vi.fn(),
+  delete: vi.fn(),
+};
+
 const assetSvc = {
   getById: vi.fn(),
   create: vi.fn(),
@@ -97,6 +105,10 @@ vi.mock("../services/routines.js", () => ({
 
 vi.mock("../services/company-skills.js", () => ({
   companySkillService: () => companySkillSvc,
+}));
+
+vi.mock("../services/company-mcp-servers.js", () => ({
+  companyMcpServerService: () => companyMcpServerSvc,
 }));
 
 vi.mock("../services/assets.js", () => ({
@@ -3161,5 +3173,98 @@ describe("company portability", () => {
     expect(preview.plan.agentPlans).toHaveLength(0);
     expect(preview.plan.projectPlans).toHaveLength(0);
     expect(preview.plan.issuePlans).toHaveLength(0);
+  });
+
+  describe("mcp servers", () => {
+    it("parses MCP server markdown into the manifest with secret references intact", async () => {
+      const portability = companyPortabilityService({} as any);
+
+      const mcpMarkdown = [
+        "---",
+        'key: "filesystem"',
+        'name: "Filesystem"',
+        'description: "Local fs MCP"',
+        'transport: "stdio"',
+        'command: "npx"',
+        "args:",
+        '  - "-y"',
+        '  - "@modelcontextprotocol/server-filesystem"',
+        '  - "/tmp"',
+        "env:",
+        '  LOG_LEVEL: "info"',
+        '  TOKEN: "${secret:fs-token}"',
+        "---",
+        "",
+        "Local fs MCP",
+      ].join("\n");
+
+      const preview = await portability.previewImport({
+        source: {
+          type: "inline",
+          rootPath: "imported",
+          files: {
+            "COMPANY.md": "---\nname: Imported Co\n---\n",
+            ".paperclip.yaml": 'schema: "paperclip/v1"\n',
+            "mcp-servers/filesystem/MCP.md": mcpMarkdown,
+          },
+        },
+        include: {
+          company: true,
+          agents: false,
+          projects: false,
+          issues: false,
+          mcpServers: true,
+        },
+        target: { mode: "new_company", newCompanyName: "Imported Co" },
+        agents: "all",
+        collisionStrategy: "rename",
+      });
+
+      expect(preview.errors).toEqual([]);
+      expect(preview.manifest.mcpServers).toHaveLength(1);
+      const [server] = preview.manifest.mcpServers;
+      expect(server).toMatchObject({
+        key: "filesystem",
+        name: "Filesystem",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        envTemplate: { LOG_LEVEL: "info", TOKEN: "${secret:fs-token}" },
+        envSecretKeys: ["fs-token"],
+        enabled: true,
+      });
+      expect(preview.include.mcpServers).toBe(true);
+    });
+
+    it("skips MCP markdown without a command and warns", async () => {
+      const portability = companyPortabilityService({} as any);
+
+      const badMcpMarkdown = [
+        "---",
+        'key: "broken"',
+        'name: "Broken"',
+        "---",
+        "",
+      ].join("\n");
+
+      const preview = await portability.previewImport({
+        source: {
+          type: "inline",
+          rootPath: "imported",
+          files: {
+            "COMPANY.md": "---\nname: Imported Co\n---\n",
+            ".paperclip.yaml": 'schema: "paperclip/v1"\n',
+            "mcp-servers/broken/MCP.md": badMcpMarkdown,
+          },
+        },
+        include: { mcpServers: true },
+        target: { mode: "new_company", newCompanyName: "Imported Co" },
+        agents: "all",
+        collisionStrategy: "rename",
+      });
+
+      expect(preview.manifest.mcpServers).toEqual([]);
+      expect(preview.warnings.some((w) => /broken/.test(w) && /command/.test(w))).toBe(true);
+    });
   });
 });

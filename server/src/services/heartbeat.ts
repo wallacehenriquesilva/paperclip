@@ -60,6 +60,7 @@ import { costService } from "./costs.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
+import { companyMcpServerService } from "./company-mcp-servers.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
@@ -381,6 +382,24 @@ export async function resolveExecutionRunAdapterConfig(input: {
     secretKeys,
     secretManifest: [...(manifest ?? []), ...(projectEnvResolution.manifest ?? [])],
   };
+}
+
+export function readDesiredMcpServerIds(runtimeConfig: unknown): string[] {
+  if (!runtimeConfig || typeof runtimeConfig !== "object" || Array.isArray(runtimeConfig)) {
+    return [];
+  }
+  const raw = (runtimeConfig as Record<string, unknown>).desiredMcpServers;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of raw) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
 }
 
 export function extractMentionedSkillIdsFromSources(
@@ -2320,6 +2339,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
+  const companyMcpServers = companyMcpServerService(db);
   const issuesSvc = issueService(db);
   const treeControlSvc = issueTreeControlService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
@@ -7095,9 +7115,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       runScopedMentionedSkillKeys,
     );
     const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
+    const desiredMcpServerIds = readDesiredMcpServerIds(agent.runtimeConfig);
+    const { resolved: paperclipResolvedMcpServers, warnings: mcpWarnings } =
+      desiredMcpServerIds.length > 0
+        ? await companyMcpServers.resolveRuntimeConfigSafe(agent.companyId, desiredMcpServerIds)
+        : { resolved: [], warnings: [] };
+    for (const warning of mcpWarnings) {
+      process.stderr.write(`[paperclip] MCP server warning: ${warning}\n`);
+    }
     let runtimeConfig = {
       ...effectiveResolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,
+      paperclipResolvedMcpServers,
     };
     const workspaceOperationRecorder = workspaceOperationsSvc.createRecorder({
       companyId: agent.companyId,

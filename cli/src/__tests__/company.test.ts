@@ -119,6 +119,7 @@ describe("renderCompanyImportPreview", () => {
         projects: true,
         issues: true,
         skills: true,
+        mcpServers: true,
       },
       targetCompanyId: "company-123",
       targetCompanyName: "Imported Co",
@@ -155,6 +156,7 @@ describe("renderCompanyImportPreview", () => {
           projects: true,
           issues: true,
           skills: true,
+          mcpServers: true,
         },
         company: {
           path: "COMPANY.md",
@@ -208,6 +210,7 @@ describe("renderCompanyImportPreview", () => {
             fileInventory: [],
           },
         ],
+        mcpServers: [],
         projects: [
           {
             slug: "alpha",
@@ -348,6 +351,7 @@ describe("import selection catalog", () => {
         projects: true,
         issues: true,
         skills: true,
+        mcpServers: true,
       },
       targetCompanyId: "company-123",
       targetCompanyName: "Imported Co",
@@ -372,6 +376,7 @@ describe("import selection catalog", () => {
           projects: true,
           issues: true,
           skills: true,
+          mcpServers: true,
         },
         company: {
           path: "COMPANY.md",
@@ -425,6 +430,7 @@ describe("import selection catalog", () => {
             fileInventory: [{ path: "skills/skill-a/helper.md", kind: "doc" }],
           },
         ],
+        mcpServers: [],
         projects: [
           {
             slug: "alpha",
@@ -523,6 +529,7 @@ describe("default adapter overrides", () => {
         projects: false,
         issues: false,
         skills: false,
+        mcpServers: false,
       },
       targetCompanyId: null,
       targetCompanyName: null,
@@ -544,6 +551,7 @@ describe("default adapter overrides", () => {
           projects: false,
           issues: false,
           skills: false,
+          mcpServers: false,
         },
         company: null,
         sidebar: null,
@@ -584,6 +592,7 @@ describe("default adapter overrides", () => {
           },
         ],
         skills: [],
+        mcpServers: [],
         projects: [],
         issues: [],
         envInputs: [],

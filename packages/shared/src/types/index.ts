@@ -62,6 +62,17 @@ export type {
   CompanySkillFileUpdateRequest,
 } from "./company-skill.js";
 export type {
+  McpServerTransport,
+  CompanyMcpServer,
+  CompanyMcpServerListItem,
+  CompanyMcpServerCreateRequest,
+  CompanyMcpServerUpdateRequest,
+  CompanyMcpServerTestRequest,
+  CompanyMcpServerTestResult,
+  McpServerEnvValueInput,
+  ResolvedMcpServer,
+} from "./company-mcp-server.js";
+export type {
   AgentSkillSyncMode,
   AgentSkillState,
   AgentSkillOrigin,
@@ -350,6 +361,7 @@ export type {
   CompanyPortabilitySidebarOrder,
   CompanyPortabilityAgentManifestEntry,
   CompanyPortabilitySkillManifestEntry,
+  CompanyPortabilityMcpServerManifestEntry,
   CompanyPortabilityProjectManifestEntry,
   CompanyPortabilityProjectWorkspaceManifestEntry,
   CompanyPortabilityIssueRoutineTriggerManifestEntry,

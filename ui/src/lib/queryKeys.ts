@@ -12,6 +12,11 @@ export const queryKeys = {
     file: (companyId: string, skillId: string, relativePath: string) =>
       ["company-skills", companyId, skillId, "file", relativePath] as const,
   },
+  companyMcpServers: {
+    list: (companyId: string) => ["company-mcp-servers", companyId] as const,
+    detail: (companyId: string, id: string) =>
+      ["company-mcp-servers", companyId, id] as const,
+  },
   agents: {
     list: (companyId: string) => ["agents", companyId] as const,
     detail: (id: string) => ["agents", "detail", id] as const,

@@ -76,6 +76,19 @@ export {
   type CompanySkillFileUpdate,
 } from "./company-skill.js";
 export {
+  MCP_SERVER_TRANSPORTS,
+  SECRET_REFERENCE_PATTERN,
+  mcpServerEnvValueSchema,
+  companyMcpServerCreateSchema,
+  companyMcpServerUpdateSchema,
+  companyMcpServerTestSchema,
+  parseSecretReference,
+  buildSecretReference,
+  type CompanyMcpServerCreate,
+  type CompanyMcpServerUpdate,
+  type CompanyMcpServerTest,
+} from "./company-mcp-server.js";
+export {
   agentSkillStateSchema,
   agentSkillSyncModeSchema,
   agentSkillEntrySchema,
