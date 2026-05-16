@@ -1,4 +1,5 @@
-import { Router, type Request } from "express";
+import { Router, type Request, type Response } from "express";
+import multer from "multer";
 import type { Db } from "@paperclipai/db";
 import {
   companySkillCreateSchema,
@@ -13,6 +14,8 @@ import { forbidden } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { getTelemetryClient } from "../telemetry.js";
 
+const MAX_SKILL_ZIP_BYTES = 10 * 1024 * 1024;
+
 type SkillTelemetryInput = {
   key: string;
   slug: string;
@@ -26,6 +29,19 @@ export function companySkillRoutes(db: Db) {
   const agents = agentService(db);
   const access = accessService(db);
   const svc = companySkillService(db);
+  const zipUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_SKILL_ZIP_BYTES, files: 1 },
+  });
+
+  async function runZipUpload(req: Request, res: Response) {
+    await new Promise<void>((resolve, reject) => {
+      zipUpload.single("file")(req, res, (err: unknown) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
 
   function canCreateAgents(agent: { permissions: Record<string, unknown> | null | undefined }) {
     if (!agent.permissions || typeof agent.permissions !== "object") return false;
@@ -213,6 +229,71 @@ export function companySkillRoutes(db: Db) {
           warningCount: result.warnings.length,
         },
       });
+      const telemetryClient = getTelemetryClient();
+      if (telemetryClient) {
+        for (const skill of result.imported) {
+          trackSkillImported(telemetryClient, {
+            sourceType: skill.sourceType,
+            skillRef: deriveTrackedSkillRef(skill),
+          });
+        }
+      }
+
+      res.status(201).json(result);
+    },
+  );
+
+  router.post(
+    "/companies/:companyId/skills/import-zip",
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      await assertCanMutateCompanySkills(req, companyId);
+
+      try {
+        await runZipUpload(req, res);
+      } catch (err) {
+        if (err instanceof multer.MulterError) {
+          if (err.code === "LIMIT_FILE_SIZE") {
+            res.status(422).json({ error: `Zip exceeds ${MAX_SKILL_ZIP_BYTES} bytes` });
+            return;
+          }
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        throw err;
+      }
+
+      const file = (req as Request & {
+        file?: { mimetype: string; buffer: Buffer; originalname: string };
+      }).file;
+      if (!file || !file.buffer || file.buffer.length === 0) {
+        res.status(400).json({ error: "Missing file field 'file'" });
+        return;
+      }
+
+      const result = await svc.importFromUploadedZip(companyId, file.buffer, {
+        uploadedFilename: file.originalname || null,
+      });
+
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "company.skills_imported",
+        entityType: "company",
+        entityId: companyId,
+        details: {
+          source: "zip-upload",
+          uploadedFilename: file.originalname || null,
+          uploadedSize: file.buffer.length,
+          importedCount: result.imported.length,
+          importedSlugs: result.imported.map((skill) => skill.slug),
+        },
+      });
+
       const telemetryClient = getTelemetryClient();
       if (telemetryClient) {
         for (const skill of result.imported) {
