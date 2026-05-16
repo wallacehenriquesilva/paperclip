@@ -187,3 +187,87 @@ export async function prepareMcpBundle(
     format: input.adapter,
   };
 }
+
+export type McpWorkspaceConfigAdapter = "cursor" | "opencode" | "gemini";
+
+export interface PrepareMcpWorkspaceConfigResult {
+  configFilePath: string;
+  serverCount: number;
+  format: McpWorkspaceConfigAdapter;
+}
+
+function workspaceConfigPath(adapter: McpWorkspaceConfigAdapter, workspaceCwd: string): string {
+  switch (adapter) {
+    case "cursor":
+      return path.resolve(workspaceCwd, ".cursor", "mcp.json");
+    case "opencode":
+      return path.resolve(workspaceCwd, ".opencode", "opencode.json");
+    case "gemini":
+      return path.resolve(workspaceCwd, ".gemini", "settings.json");
+  }
+}
+
+/**
+ * Writes a workspace-scoped MCP config file that the adapter CLI auto-discovers
+ * (Cursor reads `<workspace>/.cursor/mcp.json`, Opencode reads
+ * `<workspace>/.opencode/opencode.json`, Gemini reads
+ * `<workspace>/.gemini/settings.json`). No CLI flag is needed.
+ *
+ * Returns `null` when there are no servers to write.
+ */
+export async function prepareMcpWorkspaceConfig(input: {
+  adapter: McpWorkspaceConfigAdapter;
+  workspaceCwd: string;
+  resolvedServers: ResolvedMcpServerEntry[];
+  onLog?: (channel: "stdout" | "stderr", line: string) => void | Promise<void>;
+}): Promise<PrepareMcpWorkspaceConfigResult | null> {
+  if (input.resolvedServers.length === 0) return null;
+
+  const configFilePath = workspaceConfigPath(input.adapter, input.workspaceCwd);
+  await fs.mkdir(path.dirname(configFilePath), { recursive: true });
+  const content = buildContent(input.adapter, input.resolvedServers);
+  await fs.writeFile(configFilePath, content, "utf8");
+
+  if (input.onLog) {
+    await input.onLog(
+      "stdout",
+      `[paperclip] Wrote ${input.resolvedServers.length} MCP server${input.resolvedServers.length === 1 ? "" : "s"} to ${configFilePath}\n`,
+    );
+  }
+
+  return {
+    configFilePath,
+    serverCount: input.resolvedServers.length,
+    format: input.adapter,
+  };
+}
+
+function escapeTomlInlineValue(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Builds an array of `-c key=value` CLI flag pairs that Codex CLI accepts as
+ * inline TOML overrides. Each MCP server contributes between 1 and N flag
+ * pairs depending on whether it has args/env. Use as:
+ *
+ *   const flags = buildCodexCliOverrideFlags(servers);
+ *   args.push(...flags);  // e.g. ["-c", "mcp_servers.foo.command=\"npx\"", ...]
+ *
+ * Returns an empty array when no servers are configured.
+ */
+export function buildCodexCliOverrideFlags(servers: ResolvedMcpServerEntry[]): string[] {
+  const out: string[] = [];
+  for (const server of servers) {
+    const base = `mcp_servers.${server.key}`;
+    out.push("-c", `${base}.command=${escapeTomlInlineValue(server.command)}`);
+    if (server.args.length > 0) {
+      const argList = server.args.map(escapeTomlInlineValue).join(", ");
+      out.push("-c", `${base}.args=[${argList}]`);
+    }
+    for (const [envKey, envValue] of Object.entries(server.env)) {
+      out.push("-c", `${base}.env.${envKey}=${escapeTomlInlineValue(envValue)}`);
+    }
+  }
+  return out;
+}
