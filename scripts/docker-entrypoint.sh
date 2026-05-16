@@ -26,4 +26,15 @@ if [ "$changed" = "1" ]; then
     chown -R node:node /paperclip
 fi
 
+# Ensure uv/uvx cache, data and bin directories are writable by the node user.
+# uvx needs all three when spawning MCP servers (downloads tools to the data
+# dir, caches packages in the cache dir, and may install symlinks under the
+# bin dir). These live inside the /paperclip volume so they persist across
+# restarts, but they're created here every boot because the volume itself may
+# pre-date these env vars.
+mkdir -p /paperclip/.cache/uv \
+         /paperclip/.local/share/uv \
+         /paperclip/.local/bin
+chown -R node:node /paperclip/.cache /paperclip/.local
+
 exec gosu node "$@"

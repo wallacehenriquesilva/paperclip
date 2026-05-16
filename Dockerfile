@@ -5,7 +5,10 @@ ARG USER_GID=1000
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 \
   && rm -rf /var/lib/apt/lists/* \
-  && corepack enable
+  && corepack enable \
+  && curl -LsSf https://astral.sh/uv/install.sh \
+       | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh \
+  && chmod 755 /usr/local/bin/uv /usr/local/bin/uvx
 
 # Modify the existing node user/group to have the specified UID/GID to match host user
 RUN usermod -u $USER_UID --non-unique node \
@@ -75,7 +78,12 @@ ENV NODE_ENV=production \
   PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
   PAPERCLIP_DEPLOYMENT_MODE=authenticated \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
-  OPENCODE_ALLOW_ALL_MODELS=true
+  OPENCODE_ALLOW_ALL_MODELS=true \
+  UV_CACHE_DIR=/paperclip/.cache/uv \
+  UV_TOOL_DIR=/paperclip/.local/share/uv/tools \
+  UV_TOOL_BIN_DIR=/paperclip/.local/bin \
+  XDG_DATA_HOME=/paperclip/.local/share \
+  XDG_CACHE_HOME=/paperclip/.cache
 
 VOLUME ["/paperclip"]
 EXPOSE 3100
