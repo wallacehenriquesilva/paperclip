@@ -99,10 +99,10 @@ The next time the agent runs, Paperclip:
 1. Reads `desiredMcpServers` from the agent's runtime config.
 2. Calls into the company MCP service to resolve each server (substituting
    any `${secret:...}` references with the live secret values).
-3. Drops the resolved config into the agent's workspace at
-   `<workspace>/.paperclip-runtime/<adapter>/mcp/<filename>`.
-4. Passes the adapter-native flag (e.g. `--mcp-config <path>` for Claude
-   Code) to the underlying CLI.
+3. Hands the resolved list to the adapter, which materializes the config
+   in whichever shape its CLI expects (a runtime-asset bundle for Claude,
+   a workspace-scoped auto-discovery file for Cursor/Opencode/Gemini, or
+   inline `-c` overrides for Codex).
 
 If a secret is referenced but missing from the target instance, the run
 continues with a warning logged to stderr — the offending server is simply
@@ -110,13 +110,18 @@ skipped, not the whole run.
 
 ## Adapter coverage
 
-| Adapter | Status | Config format | Path |
+All five local CLI adapters ship with MCP wiring in V1. Each one uses
+the format and discovery mechanism the underlying CLI expects:
+
+| Adapter | Status | Strategy | Where the config lands |
 |---|---|---|---|
-| `claude-local` | ✅ Shipped in V1 | JSON `mcpServers` | `.paperclip-runtime/claude/mcp/mcp.json`, passed via `--mcp-config` |
-| `cursor-local` | ⏳ Planned | JSON `mcpServers` | `.cursor/mcp.json` (auto-discovered) |
-| `codex-local` | ⏳ Planned | TOML `[mcp_servers.<key>]` | passed via `--config mcp_servers_config=` |
-| `gemini-local` | ⏳ Planned | JSON | Pending verification of Gemini CLI MCP flag |
-| `opencode-local` | ⏳ Planned | JSON | `.opencode/config.json` (auto-discovered) |
+| `claude-local` | ✅ | Runtime-asset bundle + `--mcp-config` flag | `<workspace>/.paperclip-runtime/claude/mcp/mcp.json` (synced to remote targets) |
+| `codex-local` | ✅ | Inline `-c mcp_servers.<key>.<field>=<value>` TOML overrides | No file — every server is described on the CLI |
+| `cursor-local` | ✅ | Workspace auto-discovery | `<workspace>/.cursor/mcp.json` |
+| `opencode-local` | ✅ | Workspace auto-discovery | `<workspace>/.opencode/opencode.json` |
+| `gemini-local` | ✅ | Workspace auto-discovery (requires Gemini CLI versions that support MCP) | `<workspace>/.gemini/settings.json` |
+| `cursor-cloud`, `openclaw-gateway` | ❌ Out of scope | Remote adapters need a different design | — |
+| `acpx-local`, `pi-local` | ❌ Out of scope | Decision deferred per-adapter | — |
 | `cursor-cloud`, `openclaw-gateway` | ❌ Out of scope | — | Remote adapters need a different design |
 | `acpx-local`, `pi-local` | ❌ Out of scope | — | Decided per-adapter once base adapters land |
 

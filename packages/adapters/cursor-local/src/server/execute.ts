@@ -47,6 +47,10 @@ import {
 import { DEFAULT_CURSOR_LOCAL_MODEL, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { parseCursorJsonl, isCursorUnknownSessionError } from "./parse.js";
 import { prepareCursorSandboxCommand } from "./remote-command.js";
+import {
+  prepareMcpWorkspaceConfig,
+  readResolvedMcpServers,
+} from "@paperclipai/adapter-utils/mcp-bundle";
 import { normalizeCursorStreamLine } from "../shared/stream.js";
 import { hasCursorTrustBypassArg } from "../shared/trust.js";
 
@@ -576,6 +580,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     runtimeNoteChars: paperclipEnvNote.length,
     heartbeatPromptChars: renderedPrompt.length,
   };
+
+  const resolvedMcpServers = readResolvedMcpServers(config);
+  await prepareMcpWorkspaceConfig({
+    adapter: "cursor",
+    workspaceCwd: cwd,
+    resolvedServers: resolvedMcpServers,
+    onLog,
+  });
 
   const buildArgs = (resumeSessionId: string | null) => {
     const args = ["-p", "--output-format", "stream-json", "--workspace", effectiveExecutionCwd];

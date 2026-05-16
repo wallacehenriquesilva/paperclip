@@ -3,8 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  buildCodexCliOverrideFlags,
   bundleDirectoryFor,
   prepareMcpBundle,
+  prepareMcpWorkspaceConfig,
   readResolvedMcpServers,
 } from "./mcp-bundle.js";
 
@@ -159,5 +161,101 @@ describe("prepareMcpBundle", () => {
       },
     });
     expect(lines.some((line) => line.includes("1 MCP server"))).toBe(true);
+  });
+});
+
+describe("prepareMcpWorkspaceConfig", () => {
+  it("returns null when there are no servers", async () => {
+    const workspace = await makeTempWorkspace("mcp-ws-empty-");
+    const result = await prepareMcpWorkspaceConfig({
+      adapter: "cursor",
+      workspaceCwd: workspace,
+      resolvedServers: [],
+    });
+    expect(result).toBeNull();
+  });
+
+  it("writes cursor config to <workspace>/.cursor/mcp.json", async () => {
+    const workspace = await makeTempWorkspace("mcp-ws-cursor-");
+    const result = await prepareMcpWorkspaceConfig({
+      adapter: "cursor",
+      workspaceCwd: workspace,
+      resolvedServers: [SAMPLE_SERVER],
+    });
+    expect(result?.configFilePath).toBe(path.join(workspace, ".cursor", "mcp.json"));
+    expect(result?.serverCount).toBe(1);
+    const written = await fs.readFile(result!.configFilePath, "utf8");
+    expect(JSON.parse(written)).toEqual({
+      mcpServers: {
+        filesystem: {
+          type: "stdio",
+          command: "npx",
+          args: SAMPLE_SERVER.args,
+          env: SAMPLE_SERVER.env,
+        },
+      },
+    });
+  });
+
+  it("writes opencode config to <workspace>/.opencode/opencode.json", async () => {
+    const workspace = await makeTempWorkspace("mcp-ws-opencode-");
+    const result = await prepareMcpWorkspaceConfig({
+      adapter: "opencode",
+      workspaceCwd: workspace,
+      resolvedServers: [SAMPLE_SERVER],
+    });
+    expect(result?.configFilePath).toBe(
+      path.join(workspace, ".opencode", "opencode.json"),
+    );
+  });
+
+  it("writes gemini config to <workspace>/.gemini/settings.json", async () => {
+    const workspace = await makeTempWorkspace("mcp-ws-gemini-");
+    const result = await prepareMcpWorkspaceConfig({
+      adapter: "gemini",
+      workspaceCwd: workspace,
+      resolvedServers: [SAMPLE_SERVER],
+    });
+    expect(result?.configFilePath).toBe(
+      path.join(workspace, ".gemini", "settings.json"),
+    );
+  });
+});
+
+describe("buildCodexCliOverrideFlags", () => {
+  it("returns an empty array when no servers are resolved", () => {
+    expect(buildCodexCliOverrideFlags([])).toEqual([]);
+  });
+
+  it("emits command + args + env flag pairs per server", () => {
+    const flags = buildCodexCliOverrideFlags([SAMPLE_SERVER]);
+    expect(flags).toEqual([
+      "-c", 'mcp_servers.filesystem.command="npx"',
+      "-c", 'mcp_servers.filesystem.args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]',
+      "-c", 'mcp_servers.filesystem.env.LOG_LEVEL="info"',
+    ]);
+  });
+
+  it("escapes quotes and backslashes in TOML values", () => {
+    const flags = buildCodexCliOverrideFlags([
+      {
+        ...SAMPLE_SERVER,
+        command: `weird"path\\with\\stuff`,
+        args: [`arg"with"quote`],
+        env: { FOO: 'bar"baz' },
+      },
+    ]);
+    expect(flags[1]).toBe('mcp_servers.filesystem.command="weird\\"path\\\\with\\\\stuff"');
+    expect(flags[3]).toBe('mcp_servers.filesystem.args=["arg\\"with\\"quote"]');
+    expect(flags[5]).toBe('mcp_servers.filesystem.env.FOO="bar\\"baz"');
+  });
+
+  it("skips args block when the server has no args", () => {
+    const flags = buildCodexCliOverrideFlags([
+      { ...SAMPLE_SERVER, args: [], env: {} },
+    ]);
+    expect(flags).toEqual([
+      "-c", 'mcp_servers.filesystem.command="npx"',
+    ]);
   });
 });
