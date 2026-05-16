@@ -3,7 +3,9 @@ import { promises as fs } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
+import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { companySecrets } from "@paperclipai/db";
 import type {
   CompanyPortabilityAgentManifestEntry,
   CompanyPortabilityCollisionStrategy,
@@ -64,6 +66,7 @@ import { assetService } from "./assets.js";
 import { generateReadme } from "./company-export-readme.js";
 import { renderOrgChartPng, type OrgNode } from "../routes/org-chart-svg.js";
 import { companySkillService } from "./company-skills.js";
+import { companyMcpServerService } from "./company-mcp-servers.js";
 import { companyService } from "./companies.js";
 import { validateCron } from "./cron.js";
 import { issueService } from "./issues.js";
@@ -122,6 +125,7 @@ const DEFAULT_INCLUDE: CompanyPortabilityInclude = {
   projects: false,
   issues: false,
   skills: false,
+  mcpServers: false,
 };
 
 const DEFAULT_COLLISION_STRATEGY: CompanyPortabilityCollisionStrategy = "rename";
@@ -145,6 +149,7 @@ function classifyPortableFileKind(pathValue: string): CompanyPortabilityExportPr
   if (normalized === "README.md") return "readme";
   if (normalized.startsWith("agents/")) return "agent";
   if (normalized.startsWith("skills/")) return "skill";
+  if (normalized.startsWith("mcp-servers/")) return "mcp-server";
   if (normalized.startsWith("projects/")) return "project";
   if (normalized.startsWith("tasks/")) return "issue";
   return "other";
@@ -1412,6 +1417,7 @@ function normalizeInclude(input?: Partial<CompanyPortabilityInclude>): CompanyPo
     projects: input?.projects ?? DEFAULT_INCLUDE.projects,
     issues: input?.issues ?? DEFAULT_INCLUDE.issues,
     skills: input?.skills ?? DEFAULT_INCLUDE.skills,
+    mcpServers: input?.mcpServers ?? DEFAULT_INCLUDE.mcpServers,
   };
 }
 
@@ -2035,6 +2041,7 @@ function applySelectedFilesToSource(source: ResolvedSource, selectedFiles?: stri
     projects: filtered.manifest.projects.length > 0,
     issues: filtered.manifest.issues.length > 0,
     skills: filtered.manifest.skills.length > 0,
+    mcpServers: filtered.manifest.mcpServers.length > 0,
   };
 
   return filtered;
@@ -2500,10 +2507,14 @@ function buildManifestFromPackageFiles(
   const discoveredSkillPaths = Object.keys(normalizedFiles).filter(
     (entry) => entry.endsWith("/SKILL.md") || entry === "SKILL.md",
   );
+  const discoveredMcpServerPaths = Object.keys(normalizedFiles).filter(
+    (entry) => entry.startsWith("mcp-servers/") && entry.endsWith("/MCP.md"),
+  );
   const agentPaths = Array.from(new Set([...referencedAgentPaths, ...discoveredAgentPaths])).sort();
   const projectPaths = Array.from(new Set([...referencedProjectPaths, ...discoveredProjectPaths])).sort();
   const taskPaths = Array.from(new Set([...referencedTaskPaths, ...discoveredTaskPaths])).sort();
   const skillPaths = Array.from(new Set([...referencedSkillPaths, ...discoveredSkillPaths])).sort();
+  const mcpServerPaths = Array.from(new Set(discoveredMcpServerPaths)).sort();
 
   const manifest: CompanyPortabilityManifest = {
     schemaVersion: 5,
@@ -2515,6 +2526,7 @@ function buildManifestFromPackageFiles(
       projects: projectPaths.length > 0,
       issues: taskPaths.length > 0,
       skills: skillPaths.length > 0,
+      mcpServers: mcpServerPaths.length > 0,
     },
     company: {
       path: resolvedCompanyPath,
@@ -2546,6 +2558,7 @@ function buildManifestFromPackageFiles(
     sidebar: paperclipSidebar,
     agents: [],
     skills: [],
+    mcpServers: [],
     projects: [],
     issues: [],
     envInputs: [],
@@ -2688,6 +2701,54 @@ function buildManifestFromPackageFiles(
       compatibility: "compatible",
       metadata: normalizedMetadata,
       fileInventory: inventory,
+    });
+  }
+
+  for (const mcpPath of mcpServerPaths) {
+    const markdownRaw = readPortableTextFile(normalizedFiles, mcpPath);
+    if (typeof markdownRaw !== "string") {
+      warnings.push(`Referenced MCP server file is missing from package: ${mcpPath}`);
+      continue;
+    }
+    const parsed = parseFrontmatterMarkdown(markdownRaw);
+    const frontmatter = parsed.frontmatter;
+    const fallbackKey = path.posix.basename(path.posix.dirname(mcpPath));
+    const key = asString(frontmatter.key) ?? fallbackKey;
+    const name = asString(frontmatter.name) ?? key;
+    const command = asString(frontmatter.command);
+    if (!command) {
+      warnings.push(`MCP server "${key}" has no command — skipping.`);
+      continue;
+    }
+    const args = Array.isArray(frontmatter.args)
+      ? frontmatter.args.filter((value): value is string => typeof value === "string")
+      : [];
+    const envTemplate: Record<string, string> = {};
+    if (isPlainRecord(frontmatter.env)) {
+      for (const [envKey, envValue] of Object.entries(frontmatter.env)) {
+        if (typeof envValue === "string") envTemplate[envKey] = envValue;
+      }
+    }
+    const envSecretKeys: string[] = [];
+    for (const value of Object.values(envTemplate)) {
+      const match = value.match(/^\$\{secret:([a-z0-9][a-z0-9_-]*)\}$/);
+      if (match) envSecretKeys.push(match[1]!);
+    }
+    const enabled = frontmatter.enabled === false ? false : true;
+    const metadata = isPlainRecord(frontmatter.metadata) ? frontmatter.metadata : null;
+
+    manifest.mcpServers.push({
+      key,
+      name,
+      path: mcpPath,
+      description: asString(frontmatter.description),
+      transport: "stdio",
+      command,
+      args,
+      envTemplate,
+      envSecretKeys,
+      enabled,
+      metadata,
     });
   }
 
@@ -2861,6 +2922,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   const projects = projectService(db);
   const issues = issueService(db);
   const companySkills = companySkillService(db);
+  const companyMcpServers = companyMcpServerService(db);
   const secrets = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
@@ -3052,6 +3114,8 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           ? true
           : input.include?.issues,
       skills: input.skills && input.skills.length > 0 ? true : input.include?.skills,
+      mcpServers:
+        input.mcpServers && input.mcpServers.length > 0 ? true : input.include?.mcpServers,
     });
     const company = await companies.getById(companyId);
     if (!company) throw notFound("Company not found");
@@ -3332,6 +3396,48 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       }
     }
 
+    if (include.mcpServers || include.agents) {
+      const mcpRows = await companyMcpServers.list(companyId);
+      const mcpSelector = new Set(
+        (input.mcpServers ?? []).map((value) => value.trim()).filter(Boolean),
+      );
+      const selectedMcpKeys = mcpSelector.size > 0
+        ? mcpRows.filter((row) => mcpSelector.has(row.key) || mcpSelector.has(row.id))
+        : mcpRows;
+      for (const row of selectedMcpKeys) {
+        const detail = await companyMcpServers.getById(companyId, row.id);
+        if (!detail) continue;
+        const packageDir = `mcp-servers/${detail.key}`;
+        const frontmatter = stripEmptyValues({
+          key: detail.key,
+          name: detail.name,
+          description: detail.description,
+          transport: detail.transport,
+          command: detail.command,
+          args: detail.args.length > 0 ? detail.args : undefined,
+          env: Object.keys(detail.envTemplate).length > 0 ? detail.envTemplate : undefined,
+          enabled: detail.enabled ? undefined : false,
+          metadata: detail.metadata && Object.keys(detail.metadata).length > 0 ? detail.metadata : undefined,
+        }) as Record<string, unknown>;
+        const body = detail.description ? `${detail.description}\n` : "";
+        files[`${packageDir}/MCP.md`] = buildMarkdown(frontmatter, body);
+        for (const value of Object.values(detail.envTemplate)) {
+          const match = value.match(/^\$\{secret:([a-z0-9][a-z0-9_-]*)\}$/);
+          if (!match) continue;
+          envInputs.push({
+            key: match[1]!,
+            description: `Referenced by MCP server "${detail.key}" — recreate in the target instance.`,
+            agentSlug: null,
+            projectSlug: null,
+            kind: "secret",
+            requirement: "required",
+            defaultValue: null,
+            portability: "system_dependent",
+          });
+        }
+      }
+    }
+
     if (include.agents) {
       for (const agent of agentRows) {
         const slug = idToSlug.get(agent.id)!;
@@ -3603,6 +3709,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       projects: resolved.manifest.projects.length > 0,
       issues: resolved.manifest.issues.length > 0,
       skills: resolved.manifest.skills.length > 0,
+      mcpServers: resolved.manifest.mcpServers.length > 0,
     };
     resolved.manifest.envInputs = dedupeEnvInputs(envInputs);
     resolved.warnings.unshift(...warnings);
@@ -3637,6 +3744,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       projects: resolved.manifest.projects.length > 0,
       issues: resolved.manifest.issues.length > 0,
       skills: resolved.manifest.skills.length > 0,
+      mcpServers: resolved.manifest.mcpServers.length > 0,
     };
     resolved.manifest.envInputs = dedupeEnvInputs(envInputs);
     resolved.warnings.unshift(...warnings);
@@ -3680,6 +3788,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         files: Object.keys(exported.files).length,
         agents: exported.manifest.agents.length,
         skills: exported.manifest.skills.length,
+        mcpServers: exported.manifest.mcpServers.length,
         projects: exported.manifest.projects.length,
         issues: exported.manifest.issues.length,
       },
@@ -3700,6 +3809,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       projects: requestedInclude.projects && manifest.projects.length > 0,
       issues: requestedInclude.issues && manifest.issues.length > 0,
       skills: requestedInclude.skills && manifest.skills.length > 0,
+      mcpServers: requestedInclude.mcpServers && manifest.mcpServers.length > 0,
     };
     const collisionStrategy = input.collisionStrategy ?? DEFAULT_COLLISION_STRATEGY;
     if (mode === "agent_safe" && collisionStrategy === "replace") {
@@ -4226,6 +4336,65 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         warnings.push(`Skipped skill ${importedSkill.originalSlug}; existing skill ${importedSkill.skill.slug} was kept.`);
       } else if (importedSkill.originalKey !== importedSkill.skill.key) {
         warnings.push(`Imported skill ${importedSkill.originalSlug} as ${importedSkill.skill.slug} to avoid overwriting an existing skill.`);
+      }
+    }
+
+    if (include.mcpServers || include.agents) {
+      for (const entry of plan.preview.manifest.mcpServers) {
+        const existingByKey = await companyMcpServers.getByKey(targetCompany.id, entry.key);
+        if (existingByKey) {
+          if (plan.collisionStrategy === "skip") {
+            warnings.push(`Skipped MCP server "${entry.key}"; existing server kept.`);
+            continue;
+          }
+          if (plan.collisionStrategy === "replace" || mode === "board_full") {
+            await companyMcpServers.delete(targetCompany.id, existingByKey.id);
+          } else {
+            warnings.push(`MCP server "${entry.key}" already exists in the target company. Skipping import.`);
+            continue;
+          }
+        }
+        const envInput: Record<string, { kind: "literal"; value: string } | { kind: "secret"; secretKey: string }> = {};
+        for (const [envKey, raw] of Object.entries(entry.envTemplate)) {
+          const match = raw.match(/^\$\{secret:([a-z0-9][a-z0-9_-]*)\}$/);
+          if (match) {
+            const secretKey = match[1]!;
+            const existingSecret = await db
+              .select({ id: companySecrets.id })
+              .from(companySecrets)
+              .where(and(
+                eq(companySecrets.companyId, targetCompany.id),
+                eq(companySecrets.key, secretKey),
+                ne(companySecrets.status, "deleted"),
+              ))
+              .then((rows) => rows[0] ?? null);
+            if (existingSecret) {
+              envInput[envKey] = { kind: "secret", secretKey };
+            } else {
+              warnings.push(
+                `MCP server "${entry.key}" env ${envKey} references missing secret "${secretKey}" in target company — dropping the env entry. Recreate the secret and edit the MCP server to re-link it.`,
+              );
+            }
+          } else {
+            envInput[envKey] = { kind: "literal", value: raw };
+          }
+        }
+        try {
+          await companyMcpServers.create(targetCompany.id, {
+            key: entry.key,
+            name: entry.name,
+            description: entry.description,
+            command: entry.command,
+            args: entry.args,
+            env: envInput,
+            enabled: entry.enabled,
+            metadata: entry.metadata ?? null,
+          });
+        } catch (err) {
+          warnings.push(
+            `Failed to import MCP server "${entry.key}": ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
     }
 

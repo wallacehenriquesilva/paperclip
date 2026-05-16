@@ -361,6 +361,7 @@ export type {
   CompanyPortabilitySidebarOrder,
   CompanyPortabilityAgentManifestEntry,
   CompanyPortabilitySkillManifestEntry,
+  CompanyPortabilityMcpServerManifestEntry,
   CompanyPortabilityProjectManifestEntry,
   CompanyPortabilityProjectWorkspaceManifestEntry,
   CompanyPortabilityIssueRoutineTriggerManifestEntry,

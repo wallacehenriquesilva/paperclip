@@ -9,6 +9,7 @@ export interface CompanyPortabilityInclude {
   projects: boolean;
   issues: boolean;
   skills: boolean;
+  mcpServers: boolean;
 }
 
 export interface CompanyPortabilityEnvInput {
@@ -164,6 +165,20 @@ export interface CompanyPortabilitySkillManifestEntry {
   }>;
 }
 
+export interface CompanyPortabilityMcpServerManifestEntry {
+  key: string;
+  name: string;
+  path: string;
+  description: string | null;
+  transport: "stdio";
+  command: string;
+  args: string[];
+  envTemplate: Record<string, string>;
+  envSecretKeys: string[];
+  enabled: boolean;
+  metadata: Record<string, unknown> | null;
+}
+
 export interface CompanyPortabilityManifest {
   schemaVersion: number;
   generatedAt: string;
@@ -176,6 +191,7 @@ export interface CompanyPortabilityManifest {
   sidebar: CompanyPortabilitySidebarOrder | null;
   agents: CompanyPortabilityAgentManifestEntry[];
   skills: CompanyPortabilitySkillManifestEntry[];
+  mcpServers: CompanyPortabilityMcpServerManifestEntry[];
   projects: CompanyPortabilityProjectManifestEntry[];
   issues: CompanyPortabilityIssueManifestEntry[];
   envInputs: CompanyPortabilityEnvInput[];
@@ -191,7 +207,7 @@ export interface CompanyPortabilityExportResult {
 
 export interface CompanyPortabilityExportPreviewFile {
   path: string;
-  kind: "company" | "agent" | "skill" | "project" | "issue" | "extension" | "readme" | "other";
+  kind: "company" | "agent" | "skill" | "mcp-server" | "project" | "issue" | "extension" | "readme" | "other";
 }
 
 export interface CompanyPortabilityExportPreviewResult {
@@ -203,6 +219,7 @@ export interface CompanyPortabilityExportPreviewResult {
     files: number;
     agents: number;
     skills: number;
+    mcpServers: number;
     projects: number;
     issues: number;
   };
@@ -324,6 +341,7 @@ export interface CompanyPortabilityExportRequest {
   include?: Partial<CompanyPortabilityInclude>;
   agents?: string[];
   skills?: string[];
+  mcpServers?: string[];
   projects?: string[];
   issues?: string[];
   projectIssues?: string[];
