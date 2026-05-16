@@ -89,20 +89,22 @@ const DEFAULT_DECLARATION_INCLUDE: CompanyPortabilityInclude = {
   projects: true,
   issues: false,
   skills: false,
+  mcpServers: false,
 };
 
 export function parseSecretsInclude(input: string | undefined): CompanyPortabilityInclude {
   if (!input?.trim()) return { ...DEFAULT_DECLARATION_INCLUDE };
   const values = input.split(",").map((part) => part.trim().toLowerCase()).filter(Boolean);
-  const include = {
+  const include: CompanyPortabilityInclude = {
     company: values.includes("company"),
     agents: values.includes("agents"),
     projects: values.includes("projects"),
     issues: values.includes("issues") || values.includes("tasks"),
     skills: values.includes("skills"),
+    mcpServers: values.includes("mcp-servers") || values.includes("mcpservers"),
   };
   if (!Object.values(include).some(Boolean)) {
-    throw new Error("Invalid --include value. Use one or more of: company,agents,projects,issues,tasks,skills");
+    throw new Error("Invalid --include value. Use one or more of: company,agents,projects,issues,tasks,skills,mcp-servers");
   }
   return include;
 }

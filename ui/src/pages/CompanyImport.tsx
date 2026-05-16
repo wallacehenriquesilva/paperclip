@@ -730,7 +730,7 @@ export function CompanyImport() {
       if (!source) throw new Error("No source configured.");
       return companiesApi.importPreview({
         source,
-        include: { company: true, agents: true, projects: true, issues: true },
+        include: { company: true, agents: true, projects: true, issues: true, mcpServers: true },
         target:
           targetMode === "new"
             ? { mode: "new_company", newCompanyName: newCompanyName || null }
@@ -834,7 +834,7 @@ export function CompanyImport() {
       if (!source) throw new Error("No source configured.");
       return companiesApi.importBundle({
         source,
-        include: { company: true, agents: true, projects: true, issues: true },
+        include: { company: true, agents: true, projects: true, issues: true, mcpServers: true },
         target:
           targetMode === "new"
             ? { mode: "new_company", newCompanyName: newCompanyName || null }

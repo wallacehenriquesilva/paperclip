@@ -125,16 +125,25 @@ export function companyService(db: Db) {
   }
 
   function isIssuePrefixConflict(error: unknown) {
-    const constraint = typeof error === "object" && error !== null && "constraint" in error
-      ? (error as { constraint?: string }).constraint
-      : typeof error === "object" && error !== null && "constraint_name" in error
-        ? (error as { constraint_name?: string }).constraint_name
-        : undefined;
-    return typeof error === "object"
-      && error !== null
-      && "code" in error
-      && (error as { code?: string }).code === "23505"
-      && constraint === "companies_issue_prefix_idx";
+    // Drizzle 0.45+ wraps PG errors in DrizzleQueryError; unwrap via `.cause`.
+    const candidates: unknown[] = [];
+    let current: unknown = error;
+    for (let depth = 0; depth < 4 && current; depth += 1) {
+      candidates.push(current);
+      current = typeof current === "object" && current !== null && "cause" in current
+        ? (current as { cause?: unknown }).cause
+        : null;
+    }
+    return candidates.some((candidate) => {
+      if (typeof candidate !== "object" || candidate === null) return false;
+      const code = "code" in candidate ? (candidate as { code?: string }).code : undefined;
+      const constraint = "constraint" in candidate
+        ? (candidate as { constraint?: string }).constraint
+        : "constraint_name" in candidate
+          ? (candidate as { constraint_name?: string }).constraint_name
+          : undefined;
+      return code === "23505" && constraint === "companies_issue_prefix_idx";
+    });
   }
 
   async function createCompanyWithUniquePrefix(data: typeof companies.$inferInsert) {

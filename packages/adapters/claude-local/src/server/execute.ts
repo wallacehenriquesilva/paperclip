@@ -59,6 +59,10 @@ import { prepareClaudeConfigSeed } from "./claude-config.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
 import { isBedrockModelId } from "./models.js";
 import { prepareClaudePromptBundle } from "./prompt-cache.js";
+import {
+  prepareMcpBundle,
+  readResolvedMcpServers,
+} from "@paperclipai/adapter-utils/mcp-bundle";
 import { buildClaudeExecutionPermissionArgs } from "./permissions.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
@@ -461,6 +465,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     instructionsContents: combinedInstructionsContents,
     onLog,
   });
+  const resolvedMcpServers = readResolvedMcpServers(config);
+  const mcpBundle = await prepareMcpBundle({
+    adapter: "claude",
+    workspaceCwd: cwd,
+    resolvedServers: resolvedMcpServers,
+    onLog,
+  });
   const useManagedRemoteClaudeConfig =
     executionTargetIsRemote &&
     adapterExecutionTargetUsesManagedHome(executionTarget) &&
@@ -495,6 +506,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 followSymlinks: true,
               }]
               : []),
+            ...(mcpBundle
+              ? [{
+                key: "mcp",
+                localDir: mcpBundle.bundleDir,
+                followSymlinks: false,
+              }]
+              : []),
           ],
         });
       })()
@@ -526,6 +544,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ? preparedExecutionTargetRuntime?.assetDirs.skills ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "claude", "skills")
     : promptBundle.addDir;
+  const effectiveMcpConfigPath = mcpBundle
+    ? executionTargetIsRemote
+      ? path.posix.join(
+          preparedExecutionTargetRuntime?.assetDirs.mcp ??
+            path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "claude", "mcp"),
+          mcpBundle.bundleFilename,
+        )
+      : mcpBundle.configFilePath
+    : null;
   const effectiveInstructionsFilePath = promptBundle.instructionsFilePath
     ? executionTargetIsRemote
       ? path.posix.join(effectivePromptBundleAddDir, path.basename(promptBundle.instructionsFilePath))
@@ -698,6 +725,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
     args.push("--add-dir", effectivePromptBundleAddDir);
+    if (effectiveMcpConfigPath) {
+      args.push("--mcp-config", effectiveMcpConfigPath);
+    }
     if (extraArgs.length > 0) args.push(...extraArgs);
     return args;
   };
