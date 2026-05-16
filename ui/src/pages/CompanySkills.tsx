@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type SVGProps } from "react";
+import { useEffect, useMemo, useRef, useState, type SVGProps } from "react";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
@@ -56,6 +56,7 @@ import {
   Save,
   Search,
   Trash2,
+  Upload,
 } from "lucide-react";
 
 type SkillTreeNode = {
@@ -794,6 +795,7 @@ export function CompanySkills() {
   const parsedRoute = useMemo(() => parseSkillRoute(routePath), [routePath]);
   const routeSkillId = parsedRoute.skillId;
   const selectedPath = parsedRoute.filePath;
+  const zipInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setBreadcrumbs([
@@ -925,6 +927,37 @@ export function CompanySkills() {
       });
     },
   });
+
+  const importZip = useMutation({
+    mutationFn: (file: File) => companySkillsApi.importFromZip(selectedCompanyId!, file),
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) });
+      if (result.imported[0]) navigate(skillRoute(result.imported[0].id));
+      pushToast({
+        tone: "success",
+        title: "Skill uploaded",
+        body: `${result.imported.length} skill${result.imported.length === 1 ? "" : "s"} added from zip.`,
+      });
+      if (result.warnings[0]) {
+        pushToast({ tone: "warn", title: "Upload warnings", body: result.warnings[0] });
+      }
+    },
+    onError: (error) => {
+      pushToast({
+        tone: "error",
+        title: "Skill upload failed",
+        body: error instanceof Error ? error.message : "Failed to upload skill zip.",
+      });
+    },
+  });
+
+  function handleZipSelected(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!selectedCompanyId) return;
+    importZip.mutate(file);
+  }
 
   const createSkill = useMutation({
     mutationFn: (payload: CompanySkillCreateRequest) => companySkillsApi.create(selectedCompanyId!, payload),
@@ -1235,6 +1268,31 @@ export function CompanySkills() {
               >
                 {importSkill.isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : "Add"}
               </Button>
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">or upload a packaged skill</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => zipInputRef.current?.click()}
+                disabled={importZip.isPending}
+              >
+                {importZip.isPending ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <Upload className="mr-1.5 h-3.5 w-3.5" />
+                    Upload .zip
+                  </>
+                )}
+              </Button>
+              <input
+                ref={zipInputRef}
+                type="file"
+                accept=".zip,application/zip,application/x-zip-compressed"
+                className="hidden"
+                onChange={handleZipSelected}
+              />
             </div>
             {scanStatusMessage && (
               <p className="mt-3 text-xs text-muted-foreground">

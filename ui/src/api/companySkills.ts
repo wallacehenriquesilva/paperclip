@@ -41,6 +41,14 @@ export const companySkillsApi = {
       `/companies/${encodeURIComponent(companyId)}/skills/import`,
       { source },
     ),
+  importFromZip: (companyId: string, file: File) => {
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    return api.postForm<CompanySkillImportResult>(
+      `/companies/${encodeURIComponent(companyId)}/skills/import-zip`,
+      formData,
+    );
+  },
   scanProjects: (companyId: string, payload: CompanySkillProjectScanRequest = {}) =>
     api.post<CompanySkillProjectScanResult>(
       `/companies/${encodeURIComponent(companyId)}/skills/scan-projects`,

@@ -29,6 +29,11 @@ import type {
 import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { notFound, unprocessable } from "../errors.js";
+import {
+  extractZipArchive,
+  ZipArchiveError,
+  type ExtractZipOptions,
+} from "../lib/zip-archive.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -2415,6 +2420,106 @@ export function companySkillService(db: Db) {
     return { imported, warnings };
   }
 
+  async function importFromUploadedZip(
+    companyId: string,
+    zipBuffer: Buffer,
+    options: {
+      uploadedFilename?: string | null;
+      extractOptions?: ExtractZipOptions;
+    } = {},
+  ): Promise<CompanySkillImportResult> {
+    await ensureSkillInventoryCurrent(companyId);
+
+    let archive;
+    try {
+      archive = extractZipArchive(zipBuffer, options.extractOptions);
+    } catch (err) {
+      if (err instanceof ZipArchiveError) {
+        throw unprocessable(err.message);
+      }
+      throw err;
+    }
+
+    const skillMdEntries = archive.entries.filter(
+      (entry) => path.posix.basename(entry.path).toLowerCase() === "skill.md",
+    );
+    if (skillMdEntries.length === 0) {
+      throw unprocessable("Zip does not contain a SKILL.md file.");
+    }
+    if (skillMdEntries.length > 1) {
+      throw unprocessable(
+        "Zip contains multiple SKILL.md files. Upload one skill per zip.",
+      );
+    }
+    const skillMdEntry = skillMdEntries[0]!;
+    const skillRootInArchive = path.posix.dirname(skillMdEntry.path);
+    const isAtArchiveRoot = skillRootInArchive === "." || skillRootInArchive === "";
+    const archiveSkillPrefix = isAtArchiveRoot ? "" : `${skillRootInArchive}/`;
+
+    const skillFiles: Array<{ relativePath: string; bytes: Buffer }> = [];
+    for (const entry of archive.entries) {
+      if (!isAtArchiveRoot && !entry.path.startsWith(archiveSkillPrefix)) continue;
+      const relativePath = isAtArchiveRoot
+        ? entry.path
+        : entry.path.slice(archiveSkillPrefix.length);
+      if (!relativePath || relativePath.endsWith("/")) continue;
+      skillFiles.push({ relativePath, bytes: entry.bytes });
+    }
+
+    const markdownContent = skillMdEntry.bytes.toString("utf8");
+    const parsedMarkdown = parseFrontmatterMarkdown(markdownContent);
+    const slugFallback = archive.strippedRoot
+      ?? (isAtArchiveRoot ? null : path.posix.basename(skillRootInArchive))
+      ?? (options.uploadedFilename
+        ? path.basename(options.uploadedFilename, path.extname(options.uploadedFilename))
+        : null)
+      ?? "skill";
+    const slug = deriveImportedSkillSlug(parsedMarkdown.frontmatter, slugFallback);
+
+    const managedRoot = resolveManagedSkillsRoot(companyId);
+    const skillDir = path.resolve(managedRoot, slug);
+    const resolvedManagedRoot = path.resolve(managedRoot);
+    if (!skillDir.startsWith(`${resolvedManagedRoot}${path.sep}`) && skillDir !== resolvedManagedRoot) {
+      throw unprocessable("Resolved skill directory escapes managed skills root.");
+    }
+
+    await fs.rm(skillDir, { recursive: true, force: true });
+    await fs.mkdir(skillDir, { recursive: true });
+
+    const uploadedSha256 = createHash("sha256").update(zipBuffer).digest("hex");
+    const extraMetadata: Record<string, unknown> = {
+      sourceKind: "uploaded_zip",
+      uploadedSha256,
+      uploadedSize: zipBuffer.length,
+    };
+    if (options.uploadedFilename) {
+      extraMetadata.uploadedFilename = options.uploadedFilename;
+    }
+
+    for (const file of skillFiles) {
+      const targetPath = path.resolve(skillDir, file.relativePath);
+      const resolvedSkillDir = path.resolve(skillDir);
+      if (
+        targetPath !== resolvedSkillDir
+        && !targetPath.startsWith(`${resolvedSkillDir}${path.sep}`)
+      ) {
+        await fs.rm(skillDir, { recursive: true, force: true });
+        throw unprocessable(`Zip entry escapes the skill directory: ${file.relativePath}`);
+      }
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, file.bytes);
+    }
+
+    const imported = await readLocalSkillImportFromDirectory(companyId, skillDir, {
+      inventoryMode: "full",
+      metadata: extraMetadata,
+    });
+    imported.key = deriveCanonicalSkillKey(companyId, imported);
+    const persisted = await upsertImportedSkills(companyId, [imported]);
+
+    return { imported: persisted, warnings: [] };
+  }
+
   async function deleteSkill(companyId: string, skillId: string): Promise<CompanySkill | null> {
     const row = await db
       .select()
@@ -2470,6 +2575,7 @@ export function companySkillService(db: Db) {
     createLocalSkill,
     deleteSkill,
     importFromSource,
+    importFromUploadedZip,
     scanProjectWorkspaces,
     importPackageFiles,
     installUpdate,
