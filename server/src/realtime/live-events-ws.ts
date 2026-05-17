@@ -242,7 +242,8 @@ export function setupLiveEventsWebSocketServer(
     const url = new URL(req.url, "http://localhost");
     const companyId = parseCompanyId(url.pathname);
     if (!companyId) {
-      socket.destroy();
+      // Path is not for live events — leave the socket alone so other
+      // upgrade listeners (e.g. instance terminal) can claim it.
       return;
     }
 
