@@ -39,6 +39,8 @@ import { CompanyExport } from "./pages/CompanyExport";
 import { CompanyImport } from "./pages/CompanyImport";
 import { DesignGuide } from "./pages/DesignGuide";
 import { InstanceGeneralSettings } from "./pages/InstanceGeneralSettings";
+import { InstanceTerminal } from "./pages/InstanceTerminal";
+import { InstanceAIAuth } from "./pages/InstanceAIAuth";
 import { InstanceAccess } from "./pages/InstanceAccess";
 import { InstanceSettings } from "./pages/InstanceSettings";
 import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
@@ -293,6 +295,8 @@ export function App() {
             <Route path="plugins" element={<PluginManager />} />
             <Route path="plugins/:pluginId" element={<PluginSettings />} />
             <Route path="adapters" element={<AdapterManager />} />
+            <Route path="terminal" element={<InstanceTerminal />} />
+            <Route path="ai-auth" element={<InstanceAIAuth />} />
           </Route>
           <Route path="companies" element={<UnprefixedBoardRedirect />} />
           <Route path="issues" element={<UnprefixedBoardRedirect />} />
