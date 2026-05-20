@@ -9,6 +9,7 @@ import {
 } from "../api/agents";
 import { companySkillsApi } from "../api/companySkills";
 import { AgentMcpServersTab } from "./AgentMcpServersTab";
+import { AgentGithubIdentityCard } from "../components/AgentGithubIdentityCard";
 import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -236,13 +237,22 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "instructions" | "configuration" | "skills" | "mcp" | "runs" | "budget";
+type AgentDetailView =
+  | "dashboard"
+  | "instructions"
+  | "configuration"
+  | "skills"
+  | "mcp"
+  | "integrations"
+  | "runs"
+  | "budget";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "instructions" || value === "prompts") return "instructions";
   if (value === "configure" || value === "configuration") return "configuration";
   if (value === "skills") return "skills";
   if (value === "mcp" || value === "mcp-servers") return "mcp";
+  if (value === "integrations") return "integrations";
   if (value === "budget") return "budget";
   if (value === "runs") return value;
   return "dashboard";
@@ -761,11 +771,13 @@ export function AgentDetail() {
             ? "skills"
             : activeView === "mcp"
               ? "mcp"
-              : activeView === "runs"
-                ? "runs"
-                : activeView === "budget"
-                  ? "budget"
-                  : "dashboard";
+              : activeView === "integrations"
+                ? "integrations"
+                : activeView === "runs"
+                  ? "runs"
+                  : activeView === "budget"
+                    ? "budget"
+                    : "dashboard";
     if (routeAgentRef !== canonicalAgentRef || urlTab !== canonicalTab) {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
       return;
@@ -885,6 +897,8 @@ export function AgentDetail() {
         crumbs.push({ label: "Configuration" });
       // } else if (activeView === "skills") { // TODO: bring back later
       //   crumbs.push({ label: "Skills" });
+      } else if (activeView === "integrations") {
+        crumbs.push({ label: "Integrations" });
       } else if (activeView === "runs") {
         crumbs.push({ label: "Runs" });
       } else if (activeView === "budget") {
@@ -1028,6 +1042,7 @@ export function AgentDetail() {
               { value: "skills", label: "Skills" },
               { value: "mcp", label: "MCP" },
               { value: "configuration", label: "Configuration" },
+              { value: "integrations", label: "Integrations" },
               { value: "runs", label: "Runs" },
               { value: "budget", label: "Budget" },
             ]}
@@ -1151,6 +1166,12 @@ export function AgentDetail() {
           companyId={resolvedCompanyId ?? undefined}
         />
       )}
+
+      {activeView === "integrations" && resolvedCompanyId ? (
+        <div className="space-y-4 p-1">
+          <AgentGithubIdentityCard agentId={agent.id} companyId={resolvedCompanyId} />
+        </div>
+      ) : null}
 
       {activeView === "runs" && (
         <RunsTab
