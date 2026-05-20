@@ -1140,3 +1140,17 @@ export type {
   EnvironmentProviderCapability,
   EnvironmentSupportStatus,
 } from "./environment-support.js";
+
+export {
+  AGENT_GITHUB_IDENTITY_STATUSES,
+  deriveAgentGithubIdentityStatus,
+  mergeAgentGithubIdentityIntoMetadata,
+  normalizeAgentGithubIdentityInput,
+  readAgentGithubIdentity,
+} from "./agent-github-identity.js";
+export type {
+  AgentGithubIdentity,
+  AgentGithubIdentityInput,
+  AgentGithubIdentityStatus,
+  AgentGithubIdentityView,
+} from "./agent-github-identity.js";

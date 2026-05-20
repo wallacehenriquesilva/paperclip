@@ -92,6 +92,7 @@ import {
   type RealizedExecutionWorkspace,
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
+import { resolveGitIdentityFromAgent } from "./git-identity.js";
 import { issueService } from "./issues.js";
 import {
   buildIssueMonitorClearedPatch,
@@ -649,6 +650,25 @@ function buildExecutionWorkspaceConfigSnapshot(
   return hasSnapshot ? snapshot : null;
 }
 
+/**
+ * Forwards only the env keys that git/gh need for GitHub authentication.
+ * Keeps unrelated secrets in the resolved adapter config out of the git
+ * subprocess environment.
+ */
+const GIT_AUTH_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_NAME"] as const;
+function extractGitAuthEnv(env: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!env || typeof env !== "object") return out;
+  const record = env as Record<string, unknown>;
+  for (const key of GIT_AUTH_ENV_KEYS) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
   const trimmed = repoUrl?.trim() ?? "";
   if (!trimmed) return null;
@@ -666,6 +686,7 @@ async function ensureManagedProjectWorkspace(input: {
   companyId: string;
   projectId: string;
   repoUrl: string | null;
+  gitAuthEnv?: Readonly<Record<string, string>> | null;
 }): Promise<{ cwd: string; warning: string | null }> {
   const cwd = resolveManagedProjectWorkspaceDir({
     companyId: input.companyId,
@@ -701,9 +722,14 @@ async function ensureManagedProjectWorkspace(input: {
     await fs.rm(cwd, { recursive: true, force: true });
   }
 
+  const cloneEnv: NodeJS.ProcessEnv = {
+    ...sanitizeRuntimeServiceBaseEnv(process.env),
+    ...(input.gitAuthEnv ?? {}),
+  };
+
   try {
     await execFile("git", ["clone", input.repoUrl, cwd], {
-      env: sanitizeRuntimeServiceBaseEnv(process.env),
+      env: cloneEnv,
       timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
     });
     return { cwd, warning: null };
@@ -7155,6 +7181,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             id: agent.id,
             name: agent.name,
             companyId: agent.companyId,
+            gitAuthEnv: extractGitAuthEnv(resolvedConfig.env),
+            gitIdentity: resolveGitIdentityFromAgent({
+              agentMetadata: agent.metadata,
+              env: extractGitAuthEnv(resolvedConfig.env),
+            }),
           },
           recorder: workspaceOperationRecorder,
         });

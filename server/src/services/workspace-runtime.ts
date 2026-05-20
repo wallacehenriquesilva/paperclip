@@ -29,6 +29,7 @@ import {
 import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
+import { configureGitIdentity, type GitIdentity } from "./git-identity.js";
 
 export function resolveShell(): string {
   const fallback = process.platform === "win32" ? "sh" : "/bin/sh";
@@ -58,6 +59,17 @@ export interface ExecutionWorkspaceAgentRef {
   id: string | null;
   name: string;
   companyId: string;
+  /**
+   * Optional whitelist of env vars to expose to git/gh subprocesses during
+   * workspace preparation (currently used for GitHub credential helper setup).
+   * Pass only what is needed — values may end up in subprocess environments.
+   */
+  gitAuthEnv?: Readonly<Record<string, string>> | null;
+  /**
+   * Optional git author identity. When provided, workspace preparation runs
+   * `git config user.email` / `user.name` scoped to the new checkout.
+   */
+  gitIdentity?: GitIdentity | null;
 }
 
 export interface RealizedExecutionWorkspace extends ExecutionWorkspaceInput {
@@ -906,6 +918,21 @@ async function provisionExecutionWorktree(input: {
   created: boolean;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
+  if (input.agent.gitAuthEnv || input.agent.gitIdentity) {
+    await configureGitIdentity({
+      cwd: input.worktreePath,
+      env: { ...process.env, ...(input.agent.gitAuthEnv ?? {}) },
+      identity: input.agent.gitIdentity ?? null,
+      logContext: {
+        agentId: input.agent.id,
+        agentName: input.agent.name,
+        companyId: input.agent.companyId,
+        worktreePath: input.worktreePath,
+        branchName: input.branchName,
+      },
+    });
+  }
+
   const provisionCommand = asString(input.strategy.provisionCommand, "").trim();
   if (!provisionCommand) return;
   const resolvedProvisionCommand = resolveRepoManagedWorkspaceCommand(provisionCommand, input.repoRoot);

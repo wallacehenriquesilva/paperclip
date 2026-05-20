@@ -17,7 +17,8 @@ import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Bot, Plus, List, GitBranch, SlidersHorizontal } from "lucide-react";
+import { Bot, Plus, List, GitBranch, SlidersHorizontal, Github as GithubIcon } from "lucide-react";
+import { readAgentGithubIdentity } from "@paperclipai/shared";
 import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
 
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
@@ -260,6 +261,7 @@ export function Agents() {
                           liveCount={liveRunByAgent.get(agent.id)!.liveCount}
                         />
                       )}
+                      <AgentIntegrationsBadges agent={agent} />
                       <span className="w-28 whitespace-nowrap text-left font-mono text-xs text-muted-foreground">
                         {getAdapterLabel(agent.adapterType)}
                       </span>
@@ -423,5 +425,20 @@ function LiveRunIndicator({
         Live{liveCount > 1 ? ` (${liveCount})` : ""}
       </span>
     </Link>
+  );
+}
+
+function AgentIntegrationsBadges({ agent }: { agent: { metadata?: Record<string, unknown> | null } }) {
+  const github = readAgentGithubIdentity(agent.metadata ?? null);
+  if (!github) return <span className="w-5" aria-hidden />;
+  const handle = github.username ? `@${github.username}` : github.userEmail ?? "GitHub configured";
+  return (
+    <span
+      className="inline-flex items-center justify-center text-muted-foreground"
+      title={`GitHub: ${handle}`}
+      aria-label={`GitHub: ${handle}`}
+    >
+      <GithubIcon className="h-3.5 w-3.5" />
+    </span>
   );
 }
