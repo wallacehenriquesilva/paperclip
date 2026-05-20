@@ -34,6 +34,7 @@ import { trackAgentCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
 import {
   agentService,
+  agentGithubIdentityService,
   agentInstructionsService,
   accessService,
   approvalService,
@@ -174,6 +175,7 @@ export function agentRoutes(
   const recovery = recoveryService(db, { enqueueWakeup: heartbeat.wakeup });
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db);
+  const githubIdentity = agentGithubIdentityService(db);
   const instructions = agentInstructionsService();
   const companySkills = companySkillService(db);
   const workspaceOperations = workspaceOperationService(db);
@@ -3442,6 +3444,105 @@ export function agentRoutes(
       adapterType: agent.adapterType,
       outputSilence: await heartbeat.buildRunOutputSilence({ ...run, companyId: issue.companyId }),
     });
+  });
+
+  router.get("/agents/:id/github-identity", async (req, res) => {
+    const id = req.params.id as string;
+    if (!(await getAccessibleAgent(req, res, id))) return;
+    const view = await githubIdentity.read(id);
+    if (!view) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    res.json(view);
+  });
+
+  router.put("/agents/:id/github-identity", async (req, res) => {
+    const id = req.params.id as string;
+    const agent = await getAccessibleAgent(req, res, id);
+    if (!agent) return;
+    const actor = getActorInfo(req);
+    const result = await githubIdentity.set(
+      id,
+      {
+        username: req.body?.username ?? null,
+        userEmail: req.body?.userEmail ?? null,
+        userName: req.body?.userName ?? null,
+        tokenSecretId: req.body?.tokenSecretId ?? null,
+      },
+      {
+        userId: actor.actorType === "user" ? actor.actorId : null,
+        agentId: actor.agentId,
+      },
+    );
+    await logActivity(db, {
+      companyId: agent.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action:
+        result.changeKind === "connected"
+          ? "agent.github.connected"
+          : result.changeKind === "disconnected"
+            ? "agent.github.disconnected"
+            : "agent.github.updated",
+      entityType: "agent",
+      entityId: id,
+      details: {
+        username: result.view.username,
+        userEmail: result.view.userEmail,
+        userName: result.view.userName,
+        tokenSecretId: result.view.tokenSecretId,
+        status: result.view.status,
+      },
+    });
+    res.json(result.view);
+  });
+
+  router.delete("/agents/:id/github-identity", async (req, res) => {
+    const id = req.params.id as string;
+    const agent = await getAccessibleAgent(req, res, id);
+    if (!agent) return;
+    const actor = getActorInfo(req);
+    const result = await githubIdentity.clear(id, {
+      userId: actor.actorType === "user" ? actor.actorId : null,
+      agentId: actor.agentId,
+    });
+    if (result.changeKind === "disconnected") {
+      await logActivity(db, {
+        companyId: agent.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "agent.github.disconnected",
+        entityType: "agent",
+        entityId: id,
+        details: { status: result.view.status },
+      });
+    }
+    res.json(result.view);
+  });
+
+  router.post("/agents/:id/github-identity/test", async (req, res) => {
+    const id = req.params.id as string;
+    const agent = await getAccessibleAgent(req, res, id);
+    if (!agent) return;
+    const actor = getActorInfo(req);
+    const result = await githubIdentity.test(id);
+    await logActivity(db, {
+      companyId: agent.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "agent.github.tested",
+      entityType: "agent",
+      entityId: id,
+      details: { ok: result.ok, status: result.status, hostname: result.hostname },
+    });
+    res.json(result);
   });
 
   return router;

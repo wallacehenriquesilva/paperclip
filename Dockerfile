@@ -86,7 +86,8 @@ ENV NODE_ENV=production \
   UV_TOOL_DIR=/paperclip/.local/share/uv/tools \
   UV_TOOL_BIN_DIR=/paperclip/.local/bin \
   XDG_DATA_HOME=/paperclip/.local/share \
-  XDG_CACHE_HOME=/paperclip/.cache
+  XDG_CACHE_HOME=/paperclip/.cache \
+  NPM_CONFIG_CACHE=/tmp/npm-cache
 
 VOLUME ["/paperclip"]
 EXPOSE 3100
