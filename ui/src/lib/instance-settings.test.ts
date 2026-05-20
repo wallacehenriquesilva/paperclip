@@ -12,6 +12,15 @@ describe("normalizeRememberedInstanceSettingsPath", () => {
     expect(normalizeRememberedInstanceSettingsPath("/instance/settings/experimental")).toBe(
       "/instance/settings/experimental",
     );
+    expect(normalizeRememberedInstanceSettingsPath("/instance/settings/terminal")).toBe(
+      "/instance/settings/terminal",
+    );
+    expect(normalizeRememberedInstanceSettingsPath("/instance/settings/ai-auth")).toBe(
+      "/instance/settings/ai-auth",
+    );
+    expect(normalizeRememberedInstanceSettingsPath("/instance/settings/adapters")).toBe(
+      "/instance/settings/adapters",
+    );
     expect(normalizeRememberedInstanceSettingsPath("/instance/settings/plugins/example?tab=config#logs")).toBe(
       "/instance/settings/plugins/example?tab=config#logs",
     );
