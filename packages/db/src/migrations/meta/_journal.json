@@ -610,6 +610,13 @@
       "when": 1778937470921,
       "tag": "0086_company_mcp_servers",
       "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1779468386595,
+      "tag": "0087_slack_event_trigger",
+      "breakpoints": true
     }
   ]
 }
