@@ -442,12 +442,26 @@ export function routineRoutes(
       authorizationHeader: req.header("authorization"),
       signatureHeader: req.header("x-paperclip-signature"),
       hubSignatureHeader: req.header("x-hub-signature-256"),
+      slackSignatureHeader: req.header("x-slack-signature"),
+      slackTimestampHeader: req.header("x-slack-request-timestamp"),
+      slackRetryNumHeader: req.header("x-slack-retry-num"),
       timestampHeader: req.header("x-paperclip-timestamp"),
       idempotencyKey: req.header("idempotency-key"),
       rawBody: (req as { rawBody?: Buffer }).rawBody ?? null,
       payload: typeof req.body === "object" && req.body !== null ? req.body as Record<string, unknown> : null,
     });
-    res.status(202).json(result);
+    switch (result.kind) {
+      case "url_verification":
+        res.status(200).json({ challenge: result.challenge });
+        return;
+      case "ignored":
+      case "filtered":
+        res.status(200).end();
+        return;
+      case "run":
+        res.status(202).json(result.run);
+        return;
+    }
   });
 
   return router;

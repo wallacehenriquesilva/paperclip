@@ -39,6 +39,14 @@ if (!embeddedPostgresSupport.supported) {
   );
 }
 
+type FirePublicTriggerResult = Awaited<ReturnType<ReturnType<typeof routineService>["firePublicTrigger"]>>;
+
+function expectRunResult(result: FirePublicTriggerResult) {
+  expect(result.kind).toBe("run");
+  if (result.kind !== "run") throw new Error(`expected run result, got ${result.kind}`);
+  return result.run;
+}
+
 describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -1267,16 +1275,77 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .update(rawBody)
       .digest("hex")}`;
 
-    const run = await svc.firePublicTrigger(trigger.publicId!, {
+    const run = expectRunResult(await svc.firePublicTrigger(trigger.publicId!, {
       signatureHeader: signature,
       timestampHeader: timestampSeconds,
       rawBody,
       payload,
-    });
+    }));
 
     expect(run.source).toBe("webhook");
     expect(run.status).toBe("issue_created");
     expect(run.linkedIssueId).toBeTruthy();
+  });
+
+  it("interpolates the webhook body into the issue via the {{payload}} builtin", async () => {
+    const { routine, svc } = await seedFixture();
+    await svc.update(
+      routine.id,
+      {
+        description: "Triggered with payload:\n{{payload}}",
+      },
+      {},
+    );
+
+    const { trigger, secretMaterial } = await svc.createTrigger(
+      routine.id,
+      {
+        kind: "webhook",
+        signingMode: "bearer",
+        replayWindowSec: 300,
+      },
+      {},
+    );
+
+    expect(secretMaterial?.webhookSecret).toBeTruthy();
+
+    const payload = { context: "from slack", user: "wallace" };
+    const run = expectRunResult(await svc.firePublicTrigger(trigger.publicId!, {
+      authorizationHeader: `Bearer ${secretMaterial!.webhookSecret}`,
+      payload,
+    }));
+
+    expect(run.source).toBe("webhook");
+    expect(run.status).toBe("issue_created");
+    expect(run.linkedIssueId).toBeTruthy();
+
+    const [issue] = await db
+      .select({ description: issues.description })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!));
+    expect(issue?.description).toContain('"context": "from slack"');
+    expect(issue?.description).toContain('"user": "wallace"');
+    expect(issue?.description).toContain("Triggered with payload:");
+  });
+
+  it("leaves {{payload}} empty for non-webhook dispatches", async () => {
+    const { routine, svc } = await seedFixture();
+    await svc.update(
+      routine.id,
+      {
+        description: "Body:[{{payload}}]",
+      },
+      {},
+    );
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+    expect(run.status).toBe("issue_created");
+
+    const [issue] = await db
+      .select({ description: issues.description })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!));
+    expect(issue?.description).toBe("Body:[]");
   });
 
   it("uses the configured provider for generated webhook trigger secrets", async () => {
@@ -1372,11 +1441,11 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .update(rawBody)
       .digest("hex")}`;
 
-    const run = await svc.firePublicTrigger(trigger.publicId!, {
+    const run = expectRunResult(await svc.firePublicTrigger(trigger.publicId!, {
       hubSignatureHeader: signature,
       rawBody,
       payload,
-    });
+    }));
 
     expect(run.source).toBe("webhook");
     expect(run.status).toBe("issue_created");
@@ -1415,11 +1484,326 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       {},
     );
 
-    const run = await svc.firePublicTrigger(trigger.publicId!, {
+    const run = expectRunResult(await svc.firePublicTrigger(trigger.publicId!, {
       payload: { event: "error.created" },
-    });
+    }));
 
     expect(run.source).toBe("webhook");
     expect(run.status).toBe("issue_created");
+  });
+
+  describe("slack_event triggers", () => {
+    function signSlackBody(secret: string, timestampSec: string, body: string) {
+      return `v0=${createHmac("sha256", secret).update(`v0:${timestampSec}:`).update(body).digest("hex")}`;
+    }
+
+    async function createSlackTriggerFixture(opts?: {
+      signingSecret?: string;
+      allowedEventTypes?: string[];
+      botUserId?: string | null;
+      teamId?: string | null;
+    }) {
+      const fixture = await seedFixture();
+      const signingSecret = opts?.signingSecret ?? "slack-signing-secret-test";
+      const { trigger } = await fixture.svc.createTrigger(
+        fixture.routine.id,
+        {
+          kind: "slack_event",
+          signingSecret,
+          allowedEventTypes: opts?.allowedEventTypes ?? ["app_mention"],
+          botUserId: opts?.botUserId ?? null,
+          teamId: opts?.teamId ?? null,
+          replayWindowSec: 300,
+        },
+        {},
+      );
+      return { ...fixture, trigger, signingSecret };
+    }
+
+    function buildAppMentionEnvelope(overrides?: {
+      eventId?: string;
+      teamId?: string;
+      user?: string;
+      text?: string;
+      channel?: string;
+      threadTs?: string | null;
+      ts?: string;
+      eventType?: string;
+    }) {
+      const event: Record<string, unknown> = {
+        type: overrides?.eventType ?? "app_mention",
+        user: overrides?.user ?? "U061F7AUR",
+        text: overrides?.text ?? "<@U0LAN0Z89> what's up?",
+        ts: overrides?.ts ?? "1515449522.000016",
+        channel: overrides?.channel ?? "C123ABC456",
+        event_ts: "1515449522000016",
+      };
+      if (overrides?.threadTs !== undefined && overrides.threadTs !== null) {
+        event.thread_ts = overrides.threadTs;
+      }
+      return {
+        token: "verification-token",
+        team_id: overrides?.teamId ?? "T123ABC456",
+        api_app_id: "A0000000",
+        type: "event_callback",
+        event_id: overrides?.eventId ?? "Ev123ABC456",
+        event_time: 1515449523,
+        authorizations: [],
+        event,
+      };
+    }
+
+    it("answers the Slack url_verification handshake with the provided challenge", async () => {
+      const { trigger, signingSecret, svc } = await createSlackTriggerFixture();
+      const envelope = { type: "url_verification", token: "tok", challenge: "abc123" };
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      });
+      expect(result.kind).toBe("url_verification");
+      if (result.kind === "url_verification") {
+        expect(result.challenge).toBe("abc123");
+      }
+    });
+
+    it("rejects a tampered Slack signature with 401", async () => {
+      const { trigger, svc } = await createSlackTriggerFixture();
+      const envelope = buildAppMentionEnvelope();
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      await expect(
+        svc.firePublicTrigger(trigger.publicId!, {
+          slackSignatureHeader: "v0=0000000000000000000000000000000000000000000000000000000000000000",
+          slackTimestampHeader: ts,
+          rawBody: Buffer.from(body),
+          payload: envelope,
+        }),
+      ).rejects.toMatchObject({ status: 401 });
+    });
+
+    it("rejects Slack requests whose timestamp falls outside the replay window", async () => {
+      const { trigger, signingSecret, svc } = await createSlackTriggerFixture();
+      const envelope = buildAppMentionEnvelope();
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000) - 10 * 60); // 10 min ago
+      await expect(
+        svc.firePublicTrigger(trigger.publicId!, {
+          slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+          slackTimestampHeader: ts,
+          rawBody: Buffer.from(body),
+          payload: envelope,
+        }),
+      ).rejects.toMatchObject({ status: 401 });
+    });
+
+    it("matches pluralised Slack subscription names against singular channel_type", async () => {
+      // Slack ships `message.channels` as the subscription name but the
+      // payload arrives with `channel_type: "channel"` (singular). Same for
+      // `message.groups` / `group`.
+      for (const [subscription, channelType] of [
+        ["message.channels", "channel"],
+        ["message.groups", "group"],
+      ] as const) {
+        const { trigger, signingSecret, svc } = await createSlackTriggerFixture({
+          allowedEventTypes: [subscription],
+        });
+        const envelope = buildAppMentionEnvelope({
+          eventType: "message",
+          eventId: `Ev-${subscription}`,
+        });
+        (envelope.event as Record<string, unknown>).channel_type = channelType;
+        const body = JSON.stringify(envelope);
+        const ts = String(Math.floor(Date.now() / 1000));
+        const result = await svc.firePublicTrigger(trigger.publicId!, {
+          slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+          slackTimestampHeader: ts,
+          rawBody: Buffer.from(body),
+          payload: envelope,
+        });
+        expect(result.kind, `expected ${subscription} (channel_type=${channelType}) to dispatch`).toBe("run");
+      }
+    });
+
+    it("matches Slack subscription names like message.im against event.type + channel_type", async () => {
+      const { routine, trigger, signingSecret, svc } = await createSlackTriggerFixture({
+        allowedEventTypes: ["message.im"],
+      });
+      await svc.update(routine.id, { description: "channel={{slack_channel}}" }, {});
+      const envelope = buildAppMentionEnvelope({
+        eventType: "message",
+        channel: "D123IM",
+      });
+      // Augment the event with channel_type=im (the discriminator Slack ships).
+      (envelope.event as Record<string, unknown>).channel_type = "im";
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      });
+      expect(result.kind).toBe("run");
+    });
+
+    it("filters Slack events whose type is outside the allowlist", async () => {
+      const { trigger, signingSecret, svc } = await createSlackTriggerFixture({
+        allowedEventTypes: ["app_mention"],
+      });
+      const envelope = buildAppMentionEnvelope({ eventType: "message" });
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      });
+      expect(result.kind).toBe("filtered");
+      if (result.kind === "filtered") {
+        expect(result.reason).toContain("event_type");
+      }
+    });
+
+    it("filters Slack events from a workspace other than the configured team_id", async () => {
+      const { trigger, signingSecret, svc } = await createSlackTriggerFixture({
+        teamId: "TAAA000000",
+      });
+      const envelope = buildAppMentionEnvelope({ teamId: "TBBB000000" });
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      });
+      expect(result.kind).toBe("filtered");
+      if (result.kind === "filtered") {
+        expect(result.reason).toBe("team_id_mismatch");
+      }
+    });
+
+    it("filters Slack events authored by the bot itself", async () => {
+      const { trigger, signingSecret, svc } = await createSlackTriggerFixture({
+        botUserId: "UBOT00000",
+      });
+      const envelope = buildAppMentionEnvelope({ user: "UBOT00000" });
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      });
+      expect(result.kind).toBe("filtered");
+      if (result.kind === "filtered") {
+        expect(result.reason).toBe("bot_self_event");
+      }
+    });
+
+    it("dispatches a run and interpolates the six slack_* builtins plus {{payload}}", async () => {
+      const { routine, trigger, signingSecret, svc } = await createSlackTriggerFixture();
+      await svc.update(
+        routine.id,
+        {
+          description: [
+            "user={{slack_user}}",
+            "text={{slack_text}}",
+            "channel={{slack_channel}}",
+            "thread={{slack_thread_ts}}",
+            "team={{slack_team_id}}",
+            "event={{slack_event_id}}",
+            "payload-snippet={{payload}}",
+          ].join("\n"),
+        },
+        {},
+      );
+
+      const envelope = buildAppMentionEnvelope({
+        eventId: "Ev9000",
+        teamId: "T9000",
+        user: "U9000",
+        text: "hello",
+        channel: "C9000",
+        threadTs: null,
+        ts: "1700000000.000100",
+      });
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+
+      const run = expectRunResult(await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      }));
+
+      expect(run.source).toBe("slack_event");
+      expect(run.status).toBe("issue_created");
+      expect(run.linkedIssueId).toBeTruthy();
+
+      const [issue] = await db
+        .select({ description: issues.description })
+        .from(issues)
+        .where(eq(issues.id, run.linkedIssueId!));
+      expect(issue?.description).toContain("user=U9000");
+      expect(issue?.description).toContain("text=hello");
+      expect(issue?.description).toContain("channel=C9000");
+      expect(issue?.description).toContain("thread=1700000000.000100");
+      expect(issue?.description).toContain("team=T9000");
+      expect(issue?.description).toContain("event=Ev9000");
+      expect(issue?.description).toContain('"event_id": "Ev9000"');
+    });
+
+    it("uses event.thread_ts when present and falls back to event.ts otherwise", async () => {
+      const { routine, trigger, signingSecret, svc } = await createSlackTriggerFixture();
+      await svc.update(
+        routine.id,
+        { description: "thread={{slack_thread_ts}}" },
+        {},
+      );
+
+      const envelope = buildAppMentionEnvelope({
+        eventId: "EvThread",
+        ts: "1700000100.000200",
+        threadTs: "1700000050.000050",
+      });
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const run = expectRunResult(await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      }));
+      const [issue] = await db
+        .select({ description: issues.description })
+        .from(issues)
+        .where(eq(issues.id, run.linkedIssueId!));
+      expect(issue?.description).toBe("thread=1700000050.000050");
+    });
+
+    it("collapses retried Slack deliveries onto the same run via event_id", async () => {
+      const { trigger, signingSecret, svc } = await createSlackTriggerFixture();
+      const envelope = buildAppMentionEnvelope({ eventId: "EvDup", ts: "1700000200.000300" });
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const headers = {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      };
+      const first = expectRunResult(await svc.firePublicTrigger(trigger.publicId!, headers));
+      const second = expectRunResult(await svc.firePublicTrigger(trigger.publicId!, headers));
+      expect(second.id).toBe(first.id);
+      expect(second.idempotencyKey).toBe("EvDup");
+    });
   });
 });

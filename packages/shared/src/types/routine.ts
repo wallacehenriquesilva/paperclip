@@ -151,6 +151,9 @@ export interface RoutineTrigger {
   secretId: string | null;
   signingMode: string | null;
   replayWindowSec: number | null;
+  allowedEventTypes: string[] | null;
+  botUserId: string | null;
+  teamId: string | null;
   lastRotatedAt: Date | null;
   lastResult: string | null;
   createdByAgentId: string | null;
