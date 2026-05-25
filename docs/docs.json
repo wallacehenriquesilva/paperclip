@@ -54,6 +54,7 @@
               "guides/board-operator/costs-and-budgets",
               "guides/board-operator/activity-log",
               "guides/board-operator/managing-mcp-servers",
+              "guides/board-operator/slack-event-triggers",
               "guides/board-operator/ai-authentication",
               "guides/board-operator/importing-and-exporting"
             ]
@@ -121,6 +122,7 @@
               "api/agents",
               "api/issues",
               "api/approvals",
+              "api/routines",
               "api/goals-and-projects",
               "api/costs",
               "api/secrets",

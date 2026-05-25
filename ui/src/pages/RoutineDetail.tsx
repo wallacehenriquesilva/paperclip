@@ -67,8 +67,9 @@ import type { RoutineDetail as RoutineDetailType, RoutineTrigger, RoutineVariabl
 
 const concurrencyPolicies = ["coalesce_if_active", "always_enqueue", "skip_if_active"];
 const catchUpPolicies = ["skip_missed", "enqueue_missed_with_cap"];
-const triggerKinds = ["schedule", "webhook"];
+const triggerKinds = ["schedule", "webhook", "slack_event"];
 const signingModes = ["bearer", "hmac_sha256", "github_hmac", "none"];
+const SLACK_EVENT_DEFAULT_TYPES = ["app_mention"];
 const routineTabs = ["triggers", "runs", "activity", "history"] as const;
 const concurrencyPolicyDescriptions: Record<string, string> = {
   coalesce_if_active: "Keep one follow-up run queued while an active run is still working.",
@@ -96,6 +97,16 @@ type SecretMessage = {
     webhookSecret: string;
   }>;
 };
+
+const TRIGGER_KIND_LABELS: Record<string, string> = {
+  schedule: "schedule",
+  webhook: "webhook",
+  slack_event: "Slack event",
+};
+
+function getTriggerKindLabel(kind: string): string {
+  return TRIGGER_KIND_LABELS[kind] ?? kind;
+}
 
 function autoResizeTextarea(element: HTMLTextAreaElement | null) {
   if (!element) return;
@@ -166,6 +177,10 @@ function TriggerEditor({
     cronExpression: trigger.cronExpression ?? "",
     signingMode: trigger.signingMode ?? "bearer",
     replayWindowSec: String(trigger.replayWindowSec ?? 300),
+    slackEventTypes: (trigger.allowedEventTypes ?? []).join(", "),
+    slackBotUserId: trigger.botUserId ?? "",
+    slackTeamId: trigger.teamId ?? "",
+    slackSigningSecret: "",
   });
 
   useEffect(() => {
@@ -174,6 +189,10 @@ function TriggerEditor({
       cronExpression: trigger.cronExpression ?? "",
       signingMode: trigger.signingMode ?? "bearer",
       replayWindowSec: String(trigger.replayWindowSec ?? 300),
+      slackEventTypes: (trigger.allowedEventTypes ?? []).join(", "),
+      slackBotUserId: trigger.botUserId ?? "",
+      slackTeamId: trigger.teamId ?? "",
+      slackSigningSecret: "",
     });
   }, [trigger]);
 
@@ -181,15 +200,17 @@ function TriggerEditor({
     <div className="rounded-lg border border-border p-4 space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-medium">
-          {trigger.kind === "schedule" ? <Clock3 className="h-3.5 w-3.5" /> : trigger.kind === "webhook" ? <Webhook className="h-3.5 w-3.5" /> : <Zap className="h-3.5 w-3.5" />}
-          {trigger.label ?? trigger.kind}
+          {trigger.kind === "schedule" ? <Clock3 className="h-3.5 w-3.5" /> : (trigger.kind === "webhook" || trigger.kind === "slack_event") ? <Webhook className="h-3.5 w-3.5" /> : <Zap className="h-3.5 w-3.5" />}
+          {trigger.label ?? getTriggerKindLabel(trigger.kind)}
         </div>
         <span className="text-xs text-muted-foreground">
           {trigger.kind === "schedule" && trigger.nextRunAt
             ? `Next: ${new Date(trigger.nextRunAt).toLocaleString()}`
             : trigger.kind === "webhook"
               ? "Webhook"
-              : "API"}
+              : trigger.kind === "slack_event"
+                ? "Slack event"
+                : "API"}
         </span>
       </div>
 
@@ -237,6 +258,77 @@ function TriggerEditor({
                 />
               </div>
             )}
+          </>
+        )}
+        {trigger.kind === "slack_event" && trigger.publicId && (
+          <div className="md:col-span-2 space-y-1.5">
+            <Label className="text-xs">Request URL</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                value={`${window.location.origin}/api/routine-triggers/public/${trigger.publicId}/fire`}
+                readOnly
+                className="flex-1 font-mono text-xs"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  void navigator.clipboard.writeText(
+                    `${window.location.origin}/api/routine-triggers/public/${trigger.publicId}/fire`,
+                  );
+                }}
+              >
+                <Copy className="h-3.5 w-3.5 mr-1" />
+                Copy
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Paste this into your Slack app's Event Subscriptions Request URL. Replace the origin with your public hostname if it differs from the board origin.
+            </p>
+          </div>
+        )}
+        {trigger.kind === "slack_event" && (
+          <>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Allowed event types</Label>
+              <Input
+                value={draft.slackEventTypes}
+                placeholder="app_mention"
+                onChange={(event) => setDraft((current) => ({ ...current, slackEventTypes: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Replay window (seconds)</Label>
+              <Input
+                value={draft.replayWindowSec}
+                onChange={(event) => setDraft((current) => ({ ...current, replayWindowSec: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Bot user id</Label>
+              <Input
+                value={draft.slackBotUserId}
+                placeholder="U…"
+                onChange={(event) => setDraft((current) => ({ ...current, slackBotUserId: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Team id</Label>
+              <Input
+                value={draft.slackTeamId}
+                placeholder="T…"
+                onChange={(event) => setDraft((current) => ({ ...current, slackTeamId: event.target.value }))}
+              />
+            </div>
+            <div className="md:col-span-2 space-y-1.5">
+              <Label className="text-xs">Signing secret (leave empty to keep current)</Label>
+              <Input
+                type="password"
+                value={draft.slackSigningSecret}
+                placeholder="Paste a new secret to rotate"
+                onChange={(event) => setDraft((current) => ({ ...current, slackSigningSecret: event.target.value }))}
+              />
+            </div>
           </>
         )}
       </div>
@@ -294,6 +386,10 @@ export function RoutineDetail() {
     cronExpression: "0 10 * * *",
     signingMode: "bearer",
     replayWindowSec: "300",
+    slackSigningSecret: "",
+    slackEventTypes: SLACK_EVENT_DEFAULT_TYPES.join(", "),
+    slackBotUserId: "",
+    slackTeamId: "",
   });
   const [editDraft, setEditDraft] = useState<{
     title: string;
@@ -567,12 +663,25 @@ export function RoutineDetail() {
             replayWindowSec: Number(newTrigger.replayWindowSec || "300"),
           }
           : {}),
+        ...(newTrigger.kind === "slack_event"
+          ? {
+            signingSecret: newTrigger.slackSigningSecret.trim(),
+            allowedEventTypes: newTrigger.slackEventTypes
+              .split(",")
+              .map((value) => value.trim())
+              .filter((value) => value.length > 0),
+            botUserId: newTrigger.slackBotUserId.trim() || null,
+            teamId: newTrigger.slackTeamId.trim() || null,
+            replayWindowSec: Number(newTrigger.replayWindowSec || "300"),
+          }
+          : {}),
       });
     },
     onSuccess: async (result) => {
       if (result.secretMaterial) {
+        const isSlack = !result.secretMaterial.webhookSecret;
         setSecretMessage({
-          title: "Webhook trigger created",
+          title: isSlack ? "Slack trigger created" : "Webhook trigger created",
           entries: [{
             webhookUrl: result.secretMaterial.webhookUrl,
             webhookSecret: result.secretMaterial.webhookSecret,
@@ -819,14 +928,18 @@ export function RoutineDetail() {
         <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-4 space-y-3 text-sm">
           <div>
             <p className="font-medium">{secretMessage.title}</p>
-            <p className="text-xs text-muted-foreground">Save this now. Paperclip will not show the secret value again.</p>
+            <p className="text-xs text-muted-foreground">
+              {secretMessage.entries.some((entry) => entry.webhookSecret)
+                ? "Save this now. Paperclip will not show the secret value again."
+                : "Paste this URL into your Slack app's Event Subscriptions Request URL."}
+            </p>
           </div>
           <div className="space-y-3">
             {secretMessage.entries.map((entry, index) => (
               <div key={`${entry.webhookUrl}-${index}`} className="space-y-2">
                 {secretMessage.entries.length > 1 && (
                   <p className="text-xs font-medium text-muted-foreground">
-                    Webhook trigger {index + 1} of {secretMessage.entries.length}
+                    Trigger {index + 1} of {secretMessage.entries.length}
                   </p>
                 )}
                 <div className="flex items-center gap-2">
@@ -836,13 +949,15 @@ export function RoutineDetail() {
                     URL
                   </Button>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Input value={entry.webhookSecret} readOnly className="flex-1" />
-                  <Button variant="outline" size="sm" onClick={() => copySecretValue("Webhook secret", entry.webhookSecret)}>
-                    <Copy className="h-3.5 w-3.5 mr-1" />
-                    Secret
-                  </Button>
-                </div>
+                {entry.webhookSecret && (
+                  <div className="flex items-center gap-2">
+                    <Input value={entry.webhookSecret} readOnly className="flex-1" />
+                    <Button variant="outline" size="sm" onClick={() => copySecretValue("Webhook secret", entry.webhookSecret)}>
+                      <Copy className="h-3.5 w-3.5 mr-1" />
+                      Secret
+                    </Button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1101,8 +1216,8 @@ export function RoutineDetail() {
                   </SelectTrigger>
                   <SelectContent>
                     {triggerKinds.map((kind) => (
-                      <SelectItem key={kind} value={kind} disabled={kind === "webhook"}>
-                        {kind}{kind === "webhook" ? " — COMING SOON" : ""}
+                      <SelectItem key={kind} value={kind}>
+                        {getTriggerKindLabel(kind)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -1139,6 +1254,56 @@ export function RoutineDetail() {
                       <Input value={newTrigger.replayWindowSec} onChange={(event) => setNewTrigger((current) => ({ ...current, replayWindowSec: event.target.value }))} />
                     </div>
                   )}
+                </>
+              )}
+              {newTrigger.kind === "slack_event" && (
+                <>
+                  <div className="md:col-span-2 space-y-1.5">
+                    <Label className="text-xs">Slack signing secret</Label>
+                    <Input
+                      type="password"
+                      value={newTrigger.slackSigningSecret}
+                      placeholder="From Slack app → Basic Information → Signing Secret"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackSigningSecret: event.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Paperclip stores this signed at rest and never displays it again.
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Allowed event types</Label>
+                    <Input
+                      value={newTrigger.slackEventTypes}
+                      placeholder="app_mention, message.channels"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackEventTypes: event.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground">Comma-separated. Defaults to <code>app_mention</code>.</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Replay window (seconds)</Label>
+                    <Input
+                      value={newTrigger.replayWindowSec}
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, replayWindowSec: event.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Bot user id (optional)</Label>
+                    <Input
+                      value={newTrigger.slackBotUserId}
+                      placeholder="U0LAN0Z89"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackBotUserId: event.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground">Drop events where the bot itself is the author (avoids loops).</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Team id (optional)</Label>
+                    <Input
+                      value={newTrigger.slackTeamId}
+                      placeholder="T123ABC456"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackTeamId: event.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground">If set, only events from this workspace are accepted.</p>
+                  </div>
                 </>
               )}
             </div>

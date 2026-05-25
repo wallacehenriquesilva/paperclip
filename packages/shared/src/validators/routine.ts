@@ -7,6 +7,7 @@ import {
   ROUTINE_TRIGGER_KINDS,
   ROUTINE_TRIGGER_SIGNING_MODES,
   ROUTINE_VARIABLE_TYPES,
+  SLACK_EVENT_TRIGGER_DEFAULT_EVENT_TYPES,
 } from "../constants.js";
 import {
   ISSUE_EXECUTION_WORKSPACE_PREFERENCES,
@@ -95,6 +96,9 @@ export const routineRevisionSnapshotTriggerV1Schema = z.object({
   publicId: z.string().nullable(),
   signingMode: z.enum(ROUTINE_TRIGGER_SIGNING_MODES).nullable(),
   replayWindowSec: z.number().int().min(30).max(86_400).nullable(),
+  allowedEventTypes: z.array(z.string().min(1)).nullable().optional(),
+  botUserId: z.string().nullable().optional(),
+  teamId: z.string().nullable().optional(),
 }).strict();
 
 export const routineRevisionSnapshotV1Schema = z.object({
@@ -112,6 +116,9 @@ const baseTriggerSchema = z.object({
   enabled: z.boolean().optional().default(true),
 });
 
+const SLACK_USER_ID_PATTERN = /^[UW][A-Z0-9]+$/;
+const SLACK_TEAM_ID_PATTERN = /^T[A-Z0-9]+$/;
+
 export const createRoutineTriggerSchema = z.discriminatedUnion("kind", [
   baseTriggerSchema.extend({
     kind: z.literal("schedule"),
@@ -120,11 +127,24 @@ export const createRoutineTriggerSchema = z.discriminatedUnion("kind", [
   }),
   baseTriggerSchema.extend({
     kind: z.literal("webhook"),
-    signingMode: z.enum(ROUTINE_TRIGGER_SIGNING_MODES).optional().default("bearer"),
+    signingMode: z.enum(["bearer", "hmac_sha256", "github_hmac", "none"]).optional().default("bearer"),
     replayWindowSec: z.number().int().min(30).max(86_400).optional().default(300),
   }),
   baseTriggerSchema.extend({
     kind: z.literal("api"),
+  }),
+  baseTriggerSchema.extend({
+    kind: z.literal("slack_event"),
+    signingSecret: z.string().trim().min(1).max(2048),
+    allowedEventTypes: z
+      .array(z.string().trim().min(1).max(120))
+      .min(1)
+      .max(50)
+      .optional()
+      .default([...SLACK_EVENT_TRIGGER_DEFAULT_EVENT_TYPES]),
+    botUserId: z.string().trim().regex(SLACK_USER_ID_PATTERN).optional().nullable(),
+    teamId: z.string().trim().regex(SLACK_TEAM_ID_PATTERN).optional().nullable(),
+    replayWindowSec: z.number().int().min(30).max(86_400).optional().default(300),
   }),
 ]);
 
@@ -137,6 +157,10 @@ export const updateRoutineTriggerSchema = z.object({
   timezone: z.string().trim().min(1).optional().nullable(),
   signingMode: z.enum(ROUTINE_TRIGGER_SIGNING_MODES).optional().nullable(),
   replayWindowSec: z.number().int().min(30).max(86_400).optional().nullable(),
+  signingSecret: z.string().trim().min(1).max(2048).optional(),
+  allowedEventTypes: z.array(z.string().trim().min(1).max(120)).min(1).max(50).optional().nullable(),
+  botUserId: z.string().trim().regex(SLACK_USER_ID_PATTERN).optional().nullable(),
+  teamId: z.string().trim().regex(SLACK_TEAM_ID_PATTERN).optional().nullable(),
 });
 
 export type UpdateRoutineTrigger = z.infer<typeof updateRoutineTriggerSchema>;
