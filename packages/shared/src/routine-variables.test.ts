@@ -47,9 +47,29 @@ describe("routine variable helpers", () => {
   it("identifies built-in variable names", () => {
     expect(isBuiltinRoutineVariable("date")).toBe(true);
     expect(isBuiltinRoutineVariable("timestamp")).toBe(true);
+    expect(isBuiltinRoutineVariable("payload")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_user")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_text")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_channel")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_thread_ts")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_team_id")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_event_id")).toBe(true);
     expect(isBuiltinRoutineVariable("repo")).toBe(false);
     expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("date")).toBe(true);
     expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("timestamp")).toBe(true);
+    expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("payload")).toBe(true);
+    expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("slack_event_id")).toBe(true);
+  });
+
+  it("getBuiltinRoutineVariableValues defaults payload and slack_* to empty strings", () => {
+    const values = getBuiltinRoutineVariableValues();
+    expect(values.payload).toBe("");
+    expect(values.slack_user).toBe("");
+    expect(values.slack_text).toBe("");
+    expect(values.slack_channel).toBe("");
+    expect(values.slack_thread_ts).toBe("");
+    expect(values.slack_team_id).toBe("");
+    expect(values.slack_event_id).toBe("");
   });
 
   it("getBuiltinRoutineVariableValues returns date in YYYY-MM-DD format", () => {
@@ -68,7 +88,48 @@ describe("routine variable helpers", () => {
 
   it("excludes built-in variables from syncRoutineVariablesWithTemplate", () => {
     const result = syncRoutineVariablesWithTemplate(
-      "Daily report for {{date}} at {{timestamp}} — {{repo}}",
+      "Daily report for {{date}} at {{timestamp}} ({{payload}}) — {{repo}} from {{slack_user}} in {{slack_channel}}",
+      [],
+    );
+    expect(result).toEqual([
+      { name: "repo", label: null, type: "text", defaultValue: null, required: true, options: [] },
+    ]);
+  });
+
+  it("resolves dotted paths against the object context when present", () => {
+    const result = interpolateRoutineTemplate(
+      "user={{payload.event.user}} ts={{payload.event.ts}}",
+      {},
+      { payload: { event: { user: "U123", ts: "1700000000.000100" } } },
+    );
+    expect(result).toBe("user=U123 ts=1700000000.000100");
+  });
+
+  it("stringifies nested objects and arrays resolved by dotted path", () => {
+    const blocks = [{ type: "rich_text", text: "hi" }];
+    const result = interpolateRoutineTemplate(
+      "blocks={{payload.event.blocks}}",
+      {},
+      { payload: { event: { blocks } } },
+    );
+    expect(result).toBe(`blocks=${JSON.stringify(blocks)}`);
+  });
+
+  it("leaves a dotted placeholder literal when the path does not resolve", () => {
+    const result = interpolateRoutineTemplate(
+      "ghost={{payload.event.missing.deep}}",
+      {},
+      { payload: { event: {} } },
+    );
+    expect(result).toBe("ghost={{payload.event.missing.deep}}");
+  });
+
+  it("extracts only the head of dotted placeholder names for variable sync", () => {
+    expect(
+      extractRoutineVariableNames("Hi {{payload.event.user}} from {{repo}}"),
+    ).toEqual(["payload", "repo"]);
+    const result = syncRoutineVariablesWithTemplate(
+      "Hi {{payload.event.user}} from {{repo}}",
       [],
     );
     expect(result).toEqual([

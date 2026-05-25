@@ -1,13 +1,23 @@
 import type { RoutineVariable } from "./types/routine.js";
 
-const ROUTINE_VARIABLE_MATCHER = /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g;
+const ROUTINE_VARIABLE_MATCHER = /\{\{\s*([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\s*\}\}/g;
 type RoutineTemplateInput = string | null | undefined | Array<string | null | undefined>;
 
 /**
  * Built-in variable names that are automatically available in routine templates
  * without needing to be defined in the routine's variables list.
  */
-export const BUILTIN_ROUTINE_VARIABLE_NAMES = new Set(["date", "timestamp"]);
+export const BUILTIN_ROUTINE_VARIABLE_NAMES = new Set([
+  "date",
+  "timestamp",
+  "payload",
+  "slack_user",
+  "slack_text",
+  "slack_channel",
+  "slack_thread_ts",
+  "slack_team_id",
+  "slack_event_id",
+]);
 
 export function isBuiltinRoutineVariable(name: string): boolean {
   return BUILTIN_ROUTINE_VARIABLE_NAMES.has(name);
@@ -34,6 +44,13 @@ export function getBuiltinRoutineVariableValues(): Record<string, string> {
   return {
     date: now.toISOString().slice(0, 10),
     timestamp: HUMAN_TIMESTAMP_FORMATTER.format(now),
+    payload: "",
+    slack_user: "",
+    slack_text: "",
+    slack_channel: "",
+    slack_thread_ts: "",
+    slack_team_id: "",
+    slack_event_id: "",
   };
 }
 
@@ -50,9 +67,14 @@ export function extractRoutineVariableNames(template: RoutineTemplateInput): str
   const found = new Set<string>();
   for (const source of normalizeRoutineTemplateInput(template)) {
     for (const match of source.matchAll(ROUTINE_VARIABLE_MATCHER)) {
-      const name = match[1];
-      if (name && !found.has(name)) {
-        found.add(name);
+      const fullName = match[1];
+      if (!fullName) continue;
+      // Dotted names (e.g. `payload.event.user`) navigate an object context at
+      // dispatch time. Their head is what gets matched against user-defined or
+      // built-in variables.
+      const headName = fullName.split(".")[0]!;
+      if (!found.has(headName)) {
+        found.add(headName);
       }
     }
   }
@@ -90,14 +112,40 @@ export function stringifyRoutineVariableValue(value: unknown): string {
   }
 }
 
+function walkObjectPath(value: unknown, segments: string[]): unknown {
+  let current: unknown = value;
+  for (const segment of segments) {
+    if (current == null || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
 export function interpolateRoutineTemplate(
   template: string | null | undefined,
   values: Record<string, unknown> | null | undefined,
+  objectContext?: Record<string, unknown> | null,
 ): string | null {
   if (template == null) return null;
-  if (!values || Object.keys(values).length === 0) return template;
+  const hasValues = !!values && Object.keys(values).length > 0;
+  const hasContext = !!objectContext && Object.keys(objectContext).length > 0;
+  if (!hasValues && !hasContext) return template;
   return template.replace(ROUTINE_VARIABLE_MATCHER, (match, rawName: string) => {
-    if (!(rawName in values)) return match;
-    return stringifyRoutineVariableValue(values[rawName]);
+    if (!rawName.includes(".")) {
+      if (hasValues && values && rawName in values) {
+        return stringifyRoutineVariableValue(values[rawName]);
+      }
+      if (hasContext && objectContext && rawName in objectContext) {
+        return stringifyRoutineVariableValue(objectContext[rawName]);
+      }
+      return match;
+    }
+    if (!hasContext || !objectContext) return match;
+    const segments = rawName.split(".");
+    const head = segments[0]!;
+    if (!(head in objectContext)) return match;
+    const resolved = walkObjectPath(objectContext[head], segments.slice(1));
+    if (resolved === undefined) return match;
+    return stringifyRoutineVariableValue(resolved);
   });
 }

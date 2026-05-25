@@ -83,6 +83,14 @@ interface RoutineTriggerSecretRestoreMaterial extends RoutineTriggerSecretMateri
   triggerId: string;
 }
 
+type RoutineRunRow = typeof routineRuns.$inferSelect;
+
+export type FirePublicTriggerResult =
+  | { kind: "run"; run: RoutineRunRow }
+  | { kind: "url_verification"; challenge: string }
+  | { kind: "ignored"; reason: string }
+  | { kind: "filtered"; reason: string };
+
 function routineWebhookSecretConfigPath(secretId: string) {
   return `webhookSecret:${secretId}`;
 }
@@ -277,7 +285,7 @@ function assertRoutineCanEnable(status: string, assigneeAgentId: string | null |
 }
 
 function collectProvidedRoutineVariables(
-  source: "schedule" | "manual" | "api" | "webhook",
+  source: "schedule" | "manual" | "api" | "webhook" | "slack_event",
   payload: Record<string, unknown> | null | undefined,
   variables: Record<string, unknown> | null | undefined,
 ) {
@@ -294,7 +302,7 @@ function collectProvidedRoutineVariables(
 function resolveRoutineVariableValues(
   variables: RoutineVariable[],
   input: {
-    source: "schedule" | "manual" | "api" | "webhook";
+    source: "schedule" | "manual" | "api" | "webhook" | "slack_event";
     payload?: Record<string, unknown> | null;
     variables?: Record<string, unknown> | null;
     automaticVariables?: Record<string, string | number | boolean>;
@@ -327,6 +335,64 @@ function resolveRoutineVariableValues(
   }
 
   return resolved;
+}
+
+const WEBHOOK_PAYLOAD_VARIABLE_MAX_BYTES = 8 * 1024;
+const WEBHOOK_PAYLOAD_TRUNCATION_SUFFIX = "\n... (truncated)";
+
+function formatWebhookPayloadForVariable(payload: Record<string, unknown> | null | undefined): string {
+  if (!payload) return "";
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(payload, null, 2);
+  } catch {
+    return "";
+  }
+  if (Buffer.byteLength(serialized, "utf8") <= WEBHOOK_PAYLOAD_VARIABLE_MAX_BYTES) {
+    return serialized;
+  }
+  const budget = WEBHOOK_PAYLOAD_VARIABLE_MAX_BYTES - Buffer.byteLength(WEBHOOK_PAYLOAD_TRUNCATION_SUFFIX, "utf8");
+  const buf = Buffer.from(serialized, "utf8").subarray(0, Math.max(budget, 0));
+  return `${buf.toString("utf8")}${WEBHOOK_PAYLOAD_TRUNCATION_SUFFIX}`;
+}
+
+// Slack pluralises subscription names for some channel kinds even though the
+// payload's `channel_type` stays singular. Mapping these explicitly lets the
+// filter match the form operators paste from the Slack app config.
+const SLACK_CHANNEL_TYPE_TO_SUBSCRIPTION_SUFFIX: Record<string, string> = {
+  channel: "channels",
+  group: "groups",
+  im: "im",
+  mpim: "mpim",
+};
+
+function stringFromRecord(source: Record<string, unknown> | null | undefined, key: string): string {
+  if (!source) return "";
+  const value = source[key];
+  return typeof value === "string" ? value : "";
+}
+
+function formatSlackVariables(envelope: Record<string, unknown> | null | undefined): Record<string, string> {
+  if (!envelope) {
+    return {
+      slack_user: "",
+      slack_text: "",
+      slack_channel: "",
+      slack_thread_ts: "",
+      slack_team_id: "",
+      slack_event_id: "",
+    };
+  }
+  const event = isPlainRecord(envelope.event) ? envelope.event : null;
+  const ts = stringFromRecord(event, "ts");
+  return {
+    slack_user: stringFromRecord(event, "user"),
+    slack_text: stringFromRecord(event, "text"),
+    slack_channel: stringFromRecord(event, "channel"),
+    slack_thread_ts: stringFromRecord(event, "thread_ts") || ts,
+    slack_team_id: stringFromRecord(envelope, "team_id"),
+    slack_event_id: stringFromRecord(envelope, "event_id"),
+  };
 }
 
 function mergeRoutineRunPayload(
@@ -954,14 +1020,15 @@ export function routineService(
     routineId: string,
     actor: Actor,
     executor?: Db,
+    options?: { valueOverride?: string; description?: string },
   ) {
-    const secretValue = crypto.randomBytes(24).toString("hex");
+    const secretValue = options?.valueOverride ?? crypto.randomBytes(24).toString("hex");
     const providerId = getConfiguredSecretProvider();
     const input = {
       name: `routine-${routineId}-${crypto.randomBytes(6).toString("hex")}`,
       provider: providerId,
       value: secretValue,
-      description: `Webhook auth for routine ${routineId}`,
+      description: options?.description ?? `Webhook auth for routine ${routineId}`,
     };
     const provider = getSecretProvider(input.provider);
     const prepared = await provider.createSecret({
@@ -1043,6 +1110,100 @@ export function routineService(
     return value;
   }
 
+  async function handleSlackEventTrigger(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    input: {
+      slackSignatureHeader?: string | null;
+      slackTimestampHeader?: string | null;
+      slackRetryNumHeader?: string | null;
+      rawBody?: Buffer | null;
+      payload?: Record<string, unknown> | null;
+    },
+  ): Promise<FirePublicTriggerResult> {
+    const providedSignature = input.slackSignatureHeader?.trim() ?? "";
+    const providedTimestamp = input.slackTimestampHeader?.trim() ?? "";
+    if (!providedSignature || !providedTimestamp) throw unauthorized();
+    if (!/^\d+$/.test(providedTimestamp)) throw unauthorized();
+    const tsSeconds = Number.parseInt(providedTimestamp, 10);
+    if (!Number.isFinite(tsSeconds)) throw unauthorized();
+    const replayWindowSec = trigger.replayWindowSec ?? 300;
+    if (Math.abs(Date.now() / 1000 - tsSeconds) > replayWindowSec) {
+      throw unauthorized();
+    }
+
+    const rawBody = input.rawBody ?? Buffer.from(JSON.stringify(input.payload ?? {}));
+    const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
+    const expectedHmac = crypto
+      .createHmac("sha256", secretValue)
+      .update(`v0:${providedTimestamp}:`)
+      .update(rawBody)
+      .digest("hex");
+    const normalizedSignature = providedSignature.replace(/^v0=/, "");
+    const expectedBuf = Buffer.from(expectedHmac);
+    const providedBuf = Buffer.from(normalizedSignature);
+    const valid =
+      providedBuf.length === expectedBuf.length &&
+      crypto.timingSafeEqual(providedBuf, expectedBuf);
+    if (!valid) throw unauthorized();
+
+    const envelope = input.payload ?? {};
+    const envelopeType = typeof envelope.type === "string" ? envelope.type : "";
+
+    if (envelopeType === "url_verification") {
+      const challenge = typeof envelope.challenge === "string" ? envelope.challenge : "";
+      return { kind: "url_verification", challenge };
+    }
+    if (envelopeType !== "event_callback") {
+      return { kind: "ignored", reason: `unsupported_envelope_type:${envelopeType || "unknown"}` };
+    }
+
+    const event = isPlainRecord(envelope.event) ? envelope.event : null;
+    const eventType = typeof event?.type === "string" ? event.type : "";
+    // Slack subscription names like `message.im` differ from the delivered
+    // `event.type` ("message" with `channel_type: "im"`). Match both forms so
+    // operators can filter using either the subscription name or the bare
+    // event type. Slack also pluralises some subscription names where the
+    // payload uses the singular `channel_type` — `channel`→`channels`,
+    // `group`→`groups` — so we generate both alternatives for completeness.
+    const channelType = typeof event?.channel_type === "string" ? event.channel_type : "";
+    const eventTypeAliases = new Set<string>();
+    if (eventType) eventTypeAliases.add(eventType);
+    if (eventType && channelType) {
+      eventTypeAliases.add(`${eventType}.${channelType}`);
+      const subscriptionSuffix = SLACK_CHANNEL_TYPE_TO_SUBSCRIPTION_SUFFIX[channelType];
+      if (subscriptionSuffix && subscriptionSuffix !== channelType) {
+        eventTypeAliases.add(`${eventType}.${subscriptionSuffix}`);
+      }
+    }
+    const allowedEventTypes = trigger.allowedEventTypes ?? [];
+    if (allowedEventTypes.length > 0 && !allowedEventTypes.some((allowed) => eventTypeAliases.has(allowed))) {
+      return { kind: "filtered", reason: `event_type:${eventType || "unknown"}` };
+    }
+    if (trigger.teamId) {
+      const eventTeamId = typeof envelope.team_id === "string" ? envelope.team_id : "";
+      if (eventTeamId !== trigger.teamId) {
+        return { kind: "filtered", reason: "team_id_mismatch" };
+      }
+    }
+    if (trigger.botUserId) {
+      const eventUser = typeof event?.user === "string" ? event.user : "";
+      if (eventUser === trigger.botUserId) {
+        return { kind: "filtered", reason: "bot_self_event" };
+      }
+    }
+
+    const idempotencyKey = typeof envelope.event_id === "string" ? envelope.event_id : null;
+    const run = await dispatchRoutineRun({
+      routine,
+      trigger,
+      source: "slack_event",
+      payload: envelope,
+      idempotencyKey,
+    });
+    return { kind: "run", run };
+  }
+
   async function touchIssueForUserInbox(
     executor: Db,
     input: {
@@ -1083,7 +1244,7 @@ export function routineService(
   async function dispatchRoutineRun(input: {
     routine: typeof routines.$inferSelect;
     trigger: typeof routineTriggers.$inferSelect | null;
-    source: "schedule" | "manual" | "api" | "webhook";
+    source: "schedule" | "manual" | "api" | "webhook" | "slack_event";
     payload?: Record<string, unknown> | null;
     variables?: Record<string, unknown> | null;
     projectId?: string | null;
@@ -1100,6 +1261,12 @@ export function routineService(
       throw unprocessable("Default agent required");
     }
     const automaticVariables: Record<string, string | number | boolean> = {};
+    if (input.source === "webhook" || input.source === "slack_event") {
+      automaticVariables.payload = formatWebhookPayloadForVariable(input.payload);
+    }
+    if (input.source === "slack_event") {
+      Object.assign(automaticVariables, formatSlackVariables(input.payload ?? null));
+    }
     if (input.executionWorkspaceId && routineUsesWorkspaceBranch(input.routine)) {
       const workspace = await db
         .select({
@@ -1124,8 +1291,12 @@ export function routineService(
       automaticVariables,
     });
     const allVariables = { ...getBuiltinRoutineVariableValues(), ...automaticVariables, ...resolvedVariables };
-    const title = interpolateRoutineTemplate(input.routine.title, allVariables) ?? input.routine.title;
-    const description = interpolateRoutineTemplate(input.routine.description, allVariables);
+    const interpolationContext: Record<string, unknown> = {};
+    if (input.payload) interpolationContext.payload = input.payload;
+    const title =
+      interpolateRoutineTemplate(input.routine.title, allVariables, interpolationContext)
+      ?? input.routine.title;
+    const description = interpolateRoutineTemplate(input.routine.description, allVariables, interpolationContext);
     const triggerPayload = mergeRoutineRunPayload(input.payload, { ...automaticVariables, ...resolvedVariables });
     const managedRoutineBinding = await getManagedRoutineBinding(input.routine);
     const managedIssueTemplate = readManagedRoutineIssueTemplate(managedRoutineBinding?.defaultsJson);
@@ -1697,6 +1868,22 @@ export function routineService(
         };
       }
 
+      if (input.kind === "slack_event") {
+        publicId = crypto.randomBytes(12).toString("hex");
+        const created = await createWebhookSecret(routine.companyId, routine.id, actor, undefined, {
+          valueOverride: input.signingSecret,
+          description: `Slack Events API signing secret for routine ${routine.id}`,
+        });
+        secretId = created.secret.id;
+        // For Slack triggers we expose only the Request URL — the signing secret
+        // is owned by the operator (it comes from the Slack app config), so we
+        // never echo it back even on create.
+        secretMaterial = {
+          webhookUrl: `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${publicId}/fire`,
+          webhookSecret: "",
+        };
+      }
+
       const { trigger, revision } = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${routine.id} for update`);
@@ -1713,9 +1900,20 @@ export function routineService(
             nextRunAt,
             publicId,
             secretId,
-            signingMode: input.kind === "webhook" ? input.signingMode : null,
-            replayWindowSec: input.kind === "webhook" ? input.replayWindowSec : null,
-            lastRotatedAt: input.kind === "webhook" ? new Date() : null,
+            signingMode:
+              input.kind === "webhook"
+                ? input.signingMode
+                : input.kind === "slack_event"
+                  ? "slack_v0"
+                  : null,
+            replayWindowSec:
+              input.kind === "webhook" || input.kind === "slack_event"
+                ? input.replayWindowSec
+                : null,
+            allowedEventTypes: input.kind === "slack_event" ? input.allowedEventTypes : null,
+            botUserId: input.kind === "slack_event" ? input.botUserId ?? null : null,
+            teamId: input.kind === "slack_event" ? input.teamId ?? null : null,
+            lastRotatedAt: input.kind === "webhook" || input.kind === "slack_event" ? new Date() : null,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
             updatedByAgentId: actor.agentId ?? null,
@@ -1770,6 +1968,28 @@ export function routineService(
         }
       }
 
+      let nextSecretId = existing.secretId;
+      let lastRotatedAt = existing.lastRotatedAt;
+      if (existing.kind === "slack_event" && patch.signingSecret) {
+        const routine = await getRoutineById(existing.routineId);
+        if (!routine) throw notFound("Routine not found");
+        const created = await createWebhookSecret(routine.companyId, routine.id, actor, undefined, {
+          valueOverride: patch.signingSecret,
+          description: `Slack Events API signing secret for routine ${routine.id}`,
+        });
+        nextSecretId = created.secret.id;
+        lastRotatedAt = new Date();
+      }
+
+      const slackPatch = existing.kind === "slack_event"
+        ? {
+          allowedEventTypes:
+            patch.allowedEventTypes === undefined ? existing.allowedEventTypes : patch.allowedEventTypes,
+          botUserId: patch.botUserId === undefined ? existing.botUserId : patch.botUserId,
+          teamId: patch.teamId === undefined ? existing.teamId : patch.teamId,
+        }
+        : {};
+
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
@@ -1781,8 +2001,11 @@ export function routineService(
             cronExpression,
             timezone,
             nextRunAt,
+            secretId: nextSecretId,
             signingMode: patch.signingMode === undefined ? existing.signingMode : patch.signingMode,
             replayWindowSec: patch.replayWindowSec === undefined ? existing.replayWindowSec : patch.replayWindowSec,
+            lastRotatedAt,
+            ...slackPatch,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
             updatedAt: new Date(),
@@ -2073,20 +2296,30 @@ export function routineService(
       authorizationHeader?: string | null;
       signatureHeader?: string | null;
       hubSignatureHeader?: string | null;
+      slackSignatureHeader?: string | null;
+      slackTimestampHeader?: string | null;
+      slackRetryNumHeader?: string | null;
       timestampHeader?: string | null;
       idempotencyKey?: string | null;
       rawBody?: Buffer | null;
       payload?: Record<string, unknown> | null;
-    }) => {
+    }): Promise<FirePublicTriggerResult> => {
       const trigger = await db
         .select()
         .from(routineTriggers)
-        .where(and(eq(routineTriggers.publicId, publicId), eq(routineTriggers.kind, "webhook")))
+        .where(eq(routineTriggers.publicId, publicId))
         .then((rows) => rows[0] ?? null);
       if (!trigger) throw notFound("Routine trigger not found");
+      if (trigger.kind !== "webhook" && trigger.kind !== "slack_event") {
+        throw notFound("Routine trigger not found");
+      }
       const routine = await getRoutineById(trigger.routineId);
       if (!routine) throw notFound("Routine not found");
       if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
+
+      if (trigger.kind === "slack_event") {
+        return handleSlackEventTrigger(trigger, routine, input);
+      }
 
       if (trigger.signingMode === "none") {
         // No authentication — the publicId in the URL acts as a shared secret.
@@ -2146,7 +2379,7 @@ export function routineService(
         if (!valid) throw unauthorized();
       }
 
-      return dispatchRoutineRun({
+      const run = await dispatchRoutineRun({
         routine,
         trigger,
         source: "webhook",
@@ -2156,6 +2389,7 @@ export function routineService(
           : null,
         idempotencyKey: input.idempotencyKey,
       });
+      return { kind: "run", run };
     },
 
     listRuns: async (routineId: string, limit = 50): Promise<RoutineRunSummary[]> => {

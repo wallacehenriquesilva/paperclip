@@ -4745,19 +4745,27 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               continue;
             }
             if (trigger.kind === "webhook") {
+              const WEBHOOK_SIGNING_MODES = ["bearer", "hmac_sha256", "github_hmac", "none"] as const;
+              type WebhookSigningMode = (typeof WEBHOOK_SIGNING_MODES)[number];
+              const signingMode: WebhookSigningMode =
+                trigger.signingMode && (WEBHOOK_SIGNING_MODES as readonly string[]).includes(trigger.signingMode)
+                  ? (trigger.signingMode as WebhookSigningMode)
+                  : "bearer";
               await routines.createTrigger(createdRoutine.id, {
                 kind: "webhook",
                 label: trigger.label,
                 enabled: trigger.enabled,
-                signingMode:
-                  trigger.signingMode && ROUTINE_TRIGGER_SIGNING_MODES.includes(trigger.signingMode as any)
-                    ? trigger.signingMode as typeof ROUTINE_TRIGGER_SIGNING_MODES[number]
-                    : "bearer",
+                signingMode,
                 replayWindowSec: trigger.replayWindowSec ?? 300,
               }, {
                 agentId: null,
                 userId: actorUserId ?? null,
               });
+              continue;
+            }
+            if (trigger.kind === "slack_event") {
+              // Slack triggers carry an external signing secret that we do not
+              // export — skip them in portability for V1.
               continue;
             }
             await routines.createTrigger(createdRoutine.id, {
