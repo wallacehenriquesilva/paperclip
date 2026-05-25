@@ -18,6 +18,9 @@ function makeScheduleTrigger(overrides: Partial<RoutineTrigger> = {}): RoutineTr
     secretId: null,
     signingMode: null,
     replayWindowSec: null,
+    allowedEventTypes: null,
+    botUserId: null,
+    teamId: null,
     lastRotatedAt: null,
     lastResult: null,
     createdByAgentId: null,
@@ -28,6 +31,19 @@ function makeScheduleTrigger(overrides: Partial<RoutineTrigger> = {}): RoutineTr
     updatedAt: new Date("2026-03-20T00:00:00.000Z"),
     ...overrides,
   };
+}
+
+function makeSlackTrigger(overrides: Partial<RoutineTrigger> = {}): RoutineTrigger {
+  return makeScheduleTrigger({
+    kind: "slack_event",
+    cronExpression: null,
+    timezone: null,
+    publicId: "abc123",
+    signingMode: "slack_v0",
+    replayWindowSec: 300,
+    allowedEventTypes: ["app_mention"],
+    ...overrides,
+  });
 }
 
 describe("buildRoutineTriggerPatch", () => {
@@ -66,6 +82,53 @@ describe("buildRoutineTriggerPatch", () => {
       label: null,
       cronExpression: "15 9 * * 1-5",
       timezone: "America/Chicago",
+    });
+  });
+
+  it("builds a Slack trigger patch with parsed event types and optional fields", () => {
+    const patch = buildRoutineTriggerPatch(
+      makeSlackTrigger(),
+      {
+        label: "Slack mentions",
+        cronExpression: "",
+        signingMode: "slack_v0",
+        replayWindowSec: "120",
+        slackEventTypes: " app_mention, message.channels ",
+        slackBotUserId: " U123 ",
+        slackTeamId: "",
+        slackSigningSecret: "  secret  ",
+      },
+      "UTC",
+    );
+
+    expect(patch).toEqual({
+      label: "Slack mentions",
+      allowedEventTypes: ["app_mention", "message.channels"],
+      botUserId: "U123",
+      teamId: null,
+      replayWindowSec: 120,
+      signingSecret: "secret",
+    });
+  });
+
+  it("defaults Slack event types to app_mention and omits empty signing secret", () => {
+    const patch = buildRoutineTriggerPatch(
+      makeSlackTrigger(),
+      {
+        label: "",
+        cronExpression: "",
+        signingMode: "slack_v0",
+        replayWindowSec: "",
+      },
+      "UTC",
+    );
+
+    expect(patch).toEqual({
+      label: null,
+      allowedEventTypes: ["app_mention"],
+      botUserId: null,
+      teamId: null,
+      replayWindowSec: 300,
     });
   });
 });
