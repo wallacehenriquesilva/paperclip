@@ -126,7 +126,7 @@ Three trigger kinds:
 }
 ```
 
-Signing modes: `bearer` (default), `hmac_sha256`. Replay window range: 30–86400 seconds (default 300).
+Signing modes: `bearer` (default), `hmac_sha256`, `github_hmac`, `none`. Replay window range: 30–86400 seconds (default 300).
 
 **API** — fires only when called explicitly via [Manual Run](#manual-run):
 
@@ -135,6 +135,21 @@ Signing modes: `bearer` (default), `hmac_sha256`. Replay window range: 30–8640
   "kind": "api"
 }
 ```
+
+**Slack event** — fires on inbound Slack Events API callbacks:
+
+```
+{
+  "kind": "slack_event",
+  "signingSecret": "<from Slack app config>",
+  "allowedEventTypes": ["app_mention"],
+  "botUserId": "U0LAN0Z89",
+  "teamId": "T123ABC456",
+  "replayWindowSec": 300
+}
+```
+
+Slack triggers receive the operator-provided Signing Secret (Slack app → Basic Information → Signing Secret). The signing mode is forced to `slack_v0`; Paperclip verifies `X-Slack-Signature` v0 + `X-Slack-Request-Timestamp` against the secret. See [Slack Event Triggers](#slack-event-triggers).
 
 A routine can have multiple triggers of different kinds.
 
@@ -185,6 +200,108 @@ POST /api/routine-triggers/public/{publicId}/fire
 ```
 
 Fires a webhook trigger from an external system. Requires a valid `Authorization` or `X-Paperclip-Signature` + `X-Paperclip-Timestamp` header pair matching the trigger's signing mode.
+
+The full request body is stored on the resulting run as `triggerPayload` and is also exposed to the routine title/description as the built-in `{{payload}}` variable — see [Template Variables](#template-variables).
+
+If the request body includes a top-level `variables` object, each key is merged into the run as a routine variable: `{"variables": {"repo": "paperclip"}}` makes `{{repo}}` available in templates.
+
+`Idempotency-Key` header (optional, ≤ 255 chars) is honored — retries with the same key return the original run instead of dispatching a new one.
+
+## Slack Event Triggers
+
+The `slack_event` trigger turns a routine into the receiver for a Slack app's Events API subscription. Each event that survives signature verification and filtering creates a routine run for the assigned agent.
+
+### Configuring the Slack app
+
+1. Create a Slack app at [api.slack.com](https://api.slack.com/apps) and install it in the workspace.
+2. Add the **Event Subscriptions** feature. For the V1 `app_mention` use case, add the `app_mentions:read` bot scope.
+3. Copy the **Signing Secret** from **Basic Information → App Credentials**. Paste it into the `signingSecret` field when creating the trigger in Paperclip — Paperclip stores it via its secret provider and never displays it again.
+4. Create the trigger via the API or the routine UI. Paperclip returns a Request URL of the form `https://<your-paperclip>/api/routine-triggers/public/<publicId>/fire`.
+5. Paste that URL into Slack's **Event Subscriptions → Request URL** field. Slack immediately sends a signed `url_verification` request; Paperclip validates the signature and responds with `{"challenge": "..."}` so the URL turns green.
+6. Subscribe to the bot events you want (e.g. `app_mention`) and reinstall the app if Slack prompts you.
+
+### How a request is handled
+
+For every inbound `POST /api/routine-triggers/public/{publicId}/fire`:
+
+1. **Signature check** — Paperclip computes `HMAC-SHA256(secret, "v0:" + ts + ":" + rawBody)` and compares it to `X-Slack-Signature` in constant time.
+2. **Replay window** — requests whose `X-Slack-Request-Timestamp` is older than `replayWindowSec` (default 300 s) are rejected with `401`.
+3. **Envelope dispatch** —
+   - `type: "url_verification"` → respond `200` with `{"challenge": "..."}`. No run is created.
+   - `type: "event_callback"` → proceed to filtering.
+   - Anything else → respond `200` with no body (`ignored`). No run is created.
+4. **Filters** — applied in this order, each returning `200` and dropping the request when it matches:
+   - `allowedEventTypes`: must include either the bare `event.type` (e.g. `"message"`) **or** the Slack subscription name in `event.type + "." + event.channel_type` form (e.g. `"message.im"`). Defaults to `["app_mention"]`. Use the dotted form when you want to scope to a channel kind (DM vs public channel vs MPIM), and the bare form to accept all subtypes.
+   - `teamId`: when set, `team_id` on the envelope must match.
+   - `botUserId`: when set, drop events where `event.user` equals the bot id — prevents the bot from responding to its own messages.
+5. **Idempotency** — `event_id` from the envelope is used as the dispatch idempotency key, so Slack retries (`X-Slack-Retry-Num`) collapse onto the original run instead of duplicating issues.
+6. **Variables** — the six `slack_*` builtins (see below) and `{{payload}}` are populated from the envelope before the title/description are interpolated.
+
+The full envelope is also saved on the run as `triggerPayload`.
+
+### Rotating the signing secret
+
+When Slack rotates a Signing Secret, `PATCH /api/routine-triggers/{triggerId}` with `signingSecret: "<new value>"`. Paperclip creates a new secret version and switches the trigger to it atomically. There is no separate rotate-secret endpoint for Slack triggers — the value originates outside Paperclip.
+
+### Out of scope (V1)
+
+- **Outbound** (Paperclip → `chat.postMessage`). Agents reply via their own Slack tooling (MCP, bot token in agent secrets) using `{{slack_channel}}` and `{{slack_thread_ts}}`.
+- **Slash commands and interactivity payloads.** Those use `application/x-www-form-urlencoded` and need a separate trigger kind.
+- **OAuth install flow.** Operators install the Slack app and copy the Signing Secret manually.
+
+## Template Variables
+
+Routine `title` and `description` are templates. Placeholders use `{{name}}` and are interpolated at dispatch time. They are useful for embedding context that varies per run — the trigger payload, the current date, the routine's own configured variables, etc.
+
+Placeholders also accept **dotted paths** that navigate the inbound payload object: `{{payload.event.user}}`, `{{payload.event.blocks}}`, etc. Each segment walks one level of the payload's JSON. If the resolved value is a string, number, or boolean, it is rendered verbatim; objects and arrays are stringified as JSON. If any segment is missing, the placeholder is left literal — exposing the failure rather than silently emitting an empty string.
+
+### Built-in variables
+
+These names are reserved and always available — you do not declare them on the routine:
+
+| Name | Value | Notes |
+|------|-------|-------|
+| `{{date}}` | Current UTC date in `YYYY-MM-DD` | Resolved at dispatch time |
+| `{{timestamp}}` | Human-readable UTC timestamp, e.g. `"April 28, 2026 at 12:17 PM UTC"` | Resolved at dispatch time |
+| `{{payload}}` | Pretty-printed JSON of the inbound trigger body | Populated for `webhook` and `slack_event` sources. Empty string for `schedule`, `manual`, and `api`. Capped at 8 KB with a `... (truncated)` suffix when exceeded |
+| `{{slack_user}}` | `event.user` from the Slack envelope | `slack_event` source only — empty otherwise |
+| `{{slack_text}}` | `event.text` from the Slack envelope | `slack_event` source only |
+| `{{slack_channel}}` | `event.channel` from the Slack envelope | `slack_event` source only |
+| `{{slack_thread_ts}}` | `event.thread_ts`, falling back to `event.ts` so the agent can always reply in a thread | `slack_event` source only |
+| `{{slack_team_id}}` | Top-level `team_id` on the envelope | `slack_event` source only |
+| `{{slack_event_id}}` | Top-level `event_id` on the envelope | `slack_event` source only — also used as the dispatch idempotency key |
+
+### User-defined variables
+
+Any other `{{name}}` placeholder in the title or description is treated as a user-defined variable and must be declared in the routine's `variables` field with a name, type, and (optionally) default value and label. Values come from:
+
+1. The `variables` object in the dispatch payload (manual run, webhook, or API).
+2. The variable's `defaultValue`, if no payload value is provided.
+
+Required variables without a value cause dispatch to fail with `422`.
+
+### Example — surface a webhook payload on the created issue
+
+Given a routine with this description:
+
+```
+Triggered with payload:
+
+{{payload}}
+```
+
+…and a webhook trigger fired with body `{"context": "from slack", "user": "wallace"}`, the issue created for the run will render:
+
+```
+Triggered with payload:
+
+{
+  "context": "from slack",
+  "user": "wallace"
+}
+```
+
+Combine with user variables for richer templates — `{{date}}` in the title, `{{repo}}` from `payload.variables.repo`, and the full `{{payload}}` blob at the bottom of the description.
 
 ## List Runs
 
