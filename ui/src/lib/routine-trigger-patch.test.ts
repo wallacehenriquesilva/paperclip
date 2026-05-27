@@ -21,6 +21,10 @@ function makeScheduleTrigger(overrides: Partial<RoutineTrigger> = {}): RoutineTr
     allowedEventTypes: null,
     botUserId: null,
     teamId: null,
+    allowedCommands: null,
+    allowedUserIds: null,
+    allowedChannelIds: null,
+    ackMessage: null,
     lastRotatedAt: null,
     lastResult: null,
     createdByAgentId: null,
@@ -42,6 +46,22 @@ function makeSlackTrigger(overrides: Partial<RoutineTrigger> = {}): RoutineTrigg
     signingMode: "slack_v0",
     replayWindowSec: 300,
     allowedEventTypes: ["app_mention"],
+    ...overrides,
+  });
+}
+
+function makeSlackCommandTrigger(overrides: Partial<RoutineTrigger> = {}): RoutineTrigger {
+  return makeScheduleTrigger({
+    kind: "slack_command",
+    cronExpression: null,
+    timezone: null,
+    publicId: "cmd-public-id",
+    signingMode: "slack_v0",
+    replayWindowSec: 300,
+    allowedCommands: ["/paperclip"],
+    allowedUserIds: null,
+    allowedChannelIds: null,
+    ackMessage: null,
     ...overrides,
   });
 }
@@ -128,6 +148,64 @@ describe("buildRoutineTriggerPatch", () => {
       allowedEventTypes: ["app_mention"],
       botUserId: null,
       teamId: null,
+      replayWindowSec: 300,
+    });
+  });
+
+  it("builds a Slack slash command patch with allowlists, teamId, and rotation", () => {
+    const patch = buildRoutineTriggerPatch(
+      makeSlackCommandTrigger(),
+      {
+        label: "Slash run",
+        cronExpression: "",
+        signingMode: "slack_v0",
+        replayWindowSec: "120",
+        slackTeamId: " T01ABC234 ",
+        slackSigningSecret: "  rotated  ",
+        slackCommandAllowedCommands: " /paperclip , /pc ",
+        slackCommandAllowedUserIds: " U123 , W456 ",
+        slackCommandAllowedChannelIds: " C0987 ",
+        slackCommandAckMessage: " working on it ",
+      },
+      "UTC",
+    );
+
+    expect(patch).toEqual({
+      label: "Slash run",
+      allowedCommands: ["/paperclip", "/pc"],
+      allowedUserIds: ["U123", "W456"],
+      allowedChannelIds: ["C0987"],
+      teamId: "T01ABC234",
+      ackMessage: "working on it",
+      replayWindowSec: 120,
+      signingSecret: "rotated",
+    });
+  });
+
+  it("omits allowedCommands when empty and nulls optional allowlists / ack", () => {
+    const patch = buildRoutineTriggerPatch(
+      makeSlackCommandTrigger(),
+      {
+        label: "",
+        cronExpression: "",
+        signingMode: "slack_v0",
+        replayWindowSec: "",
+        slackTeamId: "",
+        slackSigningSecret: "",
+        slackCommandAllowedCommands: "",
+        slackCommandAllowedUserIds: "",
+        slackCommandAllowedChannelIds: "",
+        slackCommandAckMessage: "",
+      },
+      "UTC",
+    );
+
+    expect(patch).toEqual({
+      label: null,
+      allowedUserIds: null,
+      allowedChannelIds: null,
+      teamId: null,
+      ackMessage: null,
       replayWindowSec: 300,
     });
   });
