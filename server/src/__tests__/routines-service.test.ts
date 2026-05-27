@@ -1806,4 +1806,242 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       expect(second.idempotencyKey).toBe("EvDup");
     });
   });
+
+  describe("slack_command triggers", () => {
+    function signSlackBody(secret: string, timestampSec: string, body: string) {
+      return `v0=${createHmac("sha256", secret).update(`v0:${timestampSec}:`).update(body).digest("hex")}`;
+    }
+
+    function encodeSlashForm(form: Record<string, string>): string {
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(form)) params.set(key, value);
+      return params.toString();
+    }
+
+    function buildSlashForm(overrides?: Partial<{
+      command: string;
+      text: string;
+      team_id: string;
+      user_id: string;
+      user_name: string;
+      channel_id: string;
+      channel_name: string;
+      trigger_id: string;
+      response_url: string;
+    }>): Record<string, string> {
+      return {
+        token: "verification-token",
+        team_id: overrides?.team_id ?? "T123ABC456",
+        team_domain: "example",
+        channel_id: overrides?.channel_id ?? "C2147483705",
+        channel_name: overrides?.channel_name ?? "test",
+        user_id: overrides?.user_id ?? "U2147483697",
+        user_name: overrides?.user_name ?? "steve",
+        command: overrides?.command ?? "/paperclip",
+        text: overrides?.text ?? "review PR 42",
+        response_url: overrides?.response_url ?? "https://hooks.slack.com/commands/T123/B456/abcdef",
+        trigger_id: overrides?.trigger_id ?? "13345224609.738474920.8088930838d88f008e0",
+        api_app_id: "A123456",
+      };
+    }
+
+    async function createSlashTriggerFixture(opts?: {
+      signingSecret?: string;
+      allowedCommands?: string[];
+      allowedUserIds?: string[] | null;
+      allowedChannelIds?: string[] | null;
+      teamId?: string | null;
+      ackMessage?: string | null;
+    }) {
+      const fixture = await seedFixture();
+      const signingSecret = opts?.signingSecret ?? "slack-slash-signing-secret";
+      const { trigger } = await fixture.svc.createTrigger(
+        fixture.routine.id,
+        {
+          kind: "slack_command",
+          signingSecret,
+          allowedCommands: opts?.allowedCommands ?? ["/paperclip"],
+          allowedUserIds: opts?.allowedUserIds ?? null,
+          allowedChannelIds: opts?.allowedChannelIds ?? null,
+          teamId: opts?.teamId ?? null,
+          ackMessage: opts?.ackMessage ?? null,
+          replayWindowSec: 300,
+        },
+        {},
+      );
+      return { ...fixture, trigger, signingSecret };
+    }
+
+    async function waitForRoutineRun(triggerId: string, expectedCount: number, timeoutMs = 5_000) {
+      // The slash handler dispatches the run fire-and-forget, so we poll the
+      // table until the expected number of rows lands or the timeout expires.
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const rows = await db
+          .select()
+          .from(routineRuns)
+          .where(eq(routineRuns.triggerId, triggerId));
+        if (rows.length >= expectedCount) return rows;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const finalRows = await db
+        .select()
+        .from(routineRuns)
+        .where(eq(routineRuns.triggerId, triggerId));
+      return finalRows;
+    }
+
+    it("returns an ack body with the default message for an allowed slash command", async () => {
+      const { trigger, signingSecret, svc } = await createSlashTriggerFixture();
+      const body = encodeSlashForm(buildSlashForm());
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: Object.fromEntries(new URLSearchParams(body)),
+      });
+      expect(result.kind).toBe("ack");
+      if (result.kind !== "ack") throw new Error(`expected ack, got ${result.kind}`);
+      expect(result.body).toEqual({
+        response_type: "ephemeral",
+        text: "Working on it — I'll follow up here when ready.",
+      });
+      const runs = await waitForRoutineRun(trigger.id, 1);
+      expect(runs.length).toBe(1);
+      expect(runs[0]!.source).toBe("slack_command");
+      expect(runs[0]!.idempotencyKey).toBe("13345224609.738474920.8088930838d88f008e0");
+    });
+
+    it("returns the operator-provided ack message verbatim", async () => {
+      const { trigger, signingSecret, svc } = await createSlashTriggerFixture({
+        ackMessage: "Got it boss",
+      });
+      const body = encodeSlashForm(buildSlashForm({ trigger_id: "trig-ack-msg" }));
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: Object.fromEntries(new URLSearchParams(body)),
+      });
+      expect(result.kind).toBe("ack");
+      if (result.kind !== "ack") throw new Error(`expected ack, got ${result.kind}`);
+      expect(result.body.text).toBe("Got it boss");
+      // Drain the background dispatch so the FK row lands before the fixture
+      // tears down the parent routine.
+      await waitForRoutineRun(trigger.id, 1);
+    });
+
+    it("rejects a tampered slash signature with 401", async () => {
+      const { trigger, svc } = await createSlashTriggerFixture();
+      const body = encodeSlashForm(buildSlashForm({ trigger_id: "trig-tampered" }));
+      const ts = String(Math.floor(Date.now() / 1000));
+      await expect(
+        svc.firePublicTrigger(trigger.publicId!, {
+          slackSignatureHeader: "v0=0000000000000000000000000000000000000000000000000000000000000000",
+          slackTimestampHeader: ts,
+          rawBody: Buffer.from(body),
+          payload: Object.fromEntries(new URLSearchParams(body)),
+        }),
+      ).rejects.toMatchObject({ status: 401 });
+    });
+
+    it("rejects slash requests outside the replay window", async () => {
+      const { trigger, signingSecret, svc } = await createSlashTriggerFixture();
+      const body = encodeSlashForm(buildSlashForm({ trigger_id: "trig-stale" }));
+      const ts = String(Math.floor(Date.now() / 1000) - 10 * 60);
+      await expect(
+        svc.firePublicTrigger(trigger.publicId!, {
+          slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+          slackTimestampHeader: ts,
+          rawBody: Buffer.from(body),
+          payload: Object.fromEntries(new URLSearchParams(body)),
+        }),
+      ).rejects.toMatchObject({ status: 401 });
+    });
+
+    it("filters commands not in the allowlist", async () => {
+      const { trigger, signingSecret, svc } = await createSlashTriggerFixture({
+        allowedCommands: ["/paperclip"],
+      });
+      const body = encodeSlashForm(buildSlashForm({ command: "/other", trigger_id: "trig-other-cmd" }));
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: Object.fromEntries(new URLSearchParams(body)),
+      });
+      expect(result.kind).toBe("filtered");
+    });
+
+    it("filters team_id mismatches when team_id is configured", async () => {
+      const { trigger, signingSecret, svc } = await createSlashTriggerFixture({
+        teamId: "T_EXPECTED",
+      });
+      const body = encodeSlashForm(buildSlashForm({ team_id: "T_DIFFERENT", trigger_id: "trig-team-mm" }));
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: Object.fromEntries(new URLSearchParams(body)),
+      });
+      expect(result.kind).toBe("filtered");
+    });
+
+    it("filters user ids not in the allowlist", async () => {
+      const { trigger, signingSecret, svc } = await createSlashTriggerFixture({
+        allowedUserIds: ["U_OK_1", "U_OK_2"],
+      });
+      const body = encodeSlashForm(buildSlashForm({ user_id: "U_OTHER", trigger_id: "trig-user-mm" }));
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: Object.fromEntries(new URLSearchParams(body)),
+      });
+      expect(result.kind).toBe("filtered");
+    });
+
+    it("filters channel ids not in the allowlist", async () => {
+      const { trigger, signingSecret, svc } = await createSlashTriggerFixture({
+        allowedChannelIds: ["C_OK"],
+      });
+      const body = encodeSlashForm(buildSlashForm({ channel_id: "C_OTHER", trigger_id: "trig-channel-mm" }));
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: Object.fromEntries(new URLSearchParams(body)),
+      });
+      expect(result.kind).toBe("filtered");
+    });
+
+    it("collapses repeated slash deliveries onto the same run via trigger_id", async () => {
+      const { trigger, signingSecret, svc } = await createSlashTriggerFixture();
+      const body = encodeSlashForm(buildSlashForm({ trigger_id: "trig-dup" }));
+      const ts = String(Math.floor(Date.now() / 1000));
+      const headers = {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: Object.fromEntries(new URLSearchParams(body)),
+      };
+      const first = await svc.firePublicTrigger(trigger.publicId!, headers);
+      expect(first.kind).toBe("ack");
+      await waitForRoutineRun(trigger.id, 1);
+      const second = await svc.firePublicTrigger(trigger.publicId!, headers);
+      expect(second.kind).toBe("ack");
+      // Give the second dispatch enough time to attempt an insert; idempotency
+      // should collapse it onto the existing row, so the count stays at 1.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const runs = await db.select().from(routineRuns).where(eq(routineRuns.triggerId, trigger.id));
+      expect(runs.length).toBe(1);
+      expect(runs[0]!.idempotencyKey).toBe("trig-dup");
+    });
+  });
 });

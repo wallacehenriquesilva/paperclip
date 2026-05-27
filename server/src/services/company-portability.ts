@@ -4763,7 +4763,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               });
               continue;
             }
-            if (trigger.kind === "slack_event") {
+            if (trigger.kind === "slack_event" || trigger.kind === "slack_command") {
               // Slack triggers carry an external signing secret that we do not
               // export — skip them in portability for V1.
               continue;
