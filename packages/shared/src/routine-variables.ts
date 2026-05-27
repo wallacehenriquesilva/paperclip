@@ -17,6 +17,13 @@ export const BUILTIN_ROUTINE_VARIABLE_NAMES = new Set([
   "slack_thread_ts",
   "slack_team_id",
   "slack_event_id",
+  "slack_command",
+  "slack_user_id",
+  "slack_user_name",
+  "slack_channel_id",
+  "slack_channel_name",
+  "slack_trigger_id",
+  "slack_response_url",
 ]);
 
 export function isBuiltinRoutineVariable(name: string): boolean {
@@ -51,6 +58,13 @@ export function getBuiltinRoutineVariableValues(): Record<string, string> {
     slack_thread_ts: "",
     slack_team_id: "",
     slack_event_id: "",
+    slack_command: "",
+    slack_user_id: "",
+    slack_user_name: "",
+    slack_channel_id: "",
+    slack_channel_name: "",
+    slack_trigger_id: "",
+    slack_response_url: "",
   };
 }
 

@@ -67,9 +67,10 @@ import type { RoutineDetail as RoutineDetailType, RoutineTrigger, RoutineVariabl
 
 const concurrencyPolicies = ["coalesce_if_active", "always_enqueue", "skip_if_active"];
 const catchUpPolicies = ["skip_missed", "enqueue_missed_with_cap"];
-const triggerKinds = ["schedule", "webhook", "slack_event"];
+const triggerKinds = ["schedule", "webhook", "slack_event", "slack_command"];
 const signingModes = ["bearer", "hmac_sha256", "github_hmac", "none"];
 const SLACK_EVENT_DEFAULT_TYPES = ["app_mention"];
+const SLACK_COMMAND_DEFAULT_ACK_MESSAGE = "Working on it — I'll follow up here when ready.";
 const routineTabs = ["triggers", "runs", "activity", "history"] as const;
 const concurrencyPolicyDescriptions: Record<string, string> = {
   coalesce_if_active: "Keep one follow-up run queued while an active run is still working.",
@@ -102,6 +103,7 @@ const TRIGGER_KIND_LABELS: Record<string, string> = {
   schedule: "schedule",
   webhook: "webhook",
   slack_event: "Slack event",
+  slack_command: "Slack slash command",
 };
 
 function getTriggerKindLabel(kind: string): string {
@@ -181,6 +183,10 @@ function TriggerEditor({
     slackBotUserId: trigger.botUserId ?? "",
     slackTeamId: trigger.teamId ?? "",
     slackSigningSecret: "",
+    slackCommandAllowedCommands: (trigger.allowedCommands ?? []).join(", "),
+    slackCommandAllowedUserIds: (trigger.allowedUserIds ?? []).join(", "),
+    slackCommandAllowedChannelIds: (trigger.allowedChannelIds ?? []).join(", "),
+    slackCommandAckMessage: trigger.ackMessage ?? "",
   });
 
   useEffect(() => {
@@ -193,6 +199,10 @@ function TriggerEditor({
       slackBotUserId: trigger.botUserId ?? "",
       slackTeamId: trigger.teamId ?? "",
       slackSigningSecret: "",
+      slackCommandAllowedCommands: (trigger.allowedCommands ?? []).join(", "),
+      slackCommandAllowedUserIds: (trigger.allowedUserIds ?? []).join(", "),
+      slackCommandAllowedChannelIds: (trigger.allowedChannelIds ?? []).join(", "),
+      slackCommandAckMessage: trigger.ackMessage ?? "",
     });
   }, [trigger]);
 
@@ -200,7 +210,7 @@ function TriggerEditor({
     <div className="rounded-lg border border-border p-4 space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-medium">
-          {trigger.kind === "schedule" ? <Clock3 className="h-3.5 w-3.5" /> : (trigger.kind === "webhook" || trigger.kind === "slack_event") ? <Webhook className="h-3.5 w-3.5" /> : <Zap className="h-3.5 w-3.5" />}
+          {trigger.kind === "schedule" ? <Clock3 className="h-3.5 w-3.5" /> : (trigger.kind === "webhook" || trigger.kind === "slack_event" || trigger.kind === "slack_command") ? <Webhook className="h-3.5 w-3.5" /> : <Zap className="h-3.5 w-3.5" />}
           {trigger.label ?? getTriggerKindLabel(trigger.kind)}
         </div>
         <span className="text-xs text-muted-foreground">
@@ -210,7 +220,9 @@ function TriggerEditor({
               ? "Webhook"
               : trigger.kind === "slack_event"
                 ? "Slack event"
-                : "API"}
+                : trigger.kind === "slack_command"
+                  ? "Slack slash command"
+                  : "API"}
         </span>
       </div>
 
@@ -331,6 +343,93 @@ function TriggerEditor({
             </div>
           </>
         )}
+        {trigger.kind === "slack_command" && trigger.publicId && (
+          <div className="md:col-span-2 space-y-1.5">
+            <Label className="text-xs">Request URL</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                value={`${window.location.origin}/api/routine-triggers/public/${trigger.publicId}/fire`}
+                readOnly
+                className="flex-1 font-mono text-xs"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  void navigator.clipboard.writeText(
+                    `${window.location.origin}/api/routine-triggers/public/${trigger.publicId}/fire`,
+                  );
+                }}
+              >
+                <Copy className="h-3.5 w-3.5 mr-1" />
+                Copy
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Paste this into each slash command's Request URL in your Slack app config. Replace the origin with your public hostname if it differs from the board origin.
+            </p>
+          </div>
+        )}
+        {trigger.kind === "slack_command" && (
+          <>
+            <div className="md:col-span-2 space-y-1.5">
+              <Label className="text-xs">Allowed commands (comma-separated, each starts with /)</Label>
+              <Input
+                value={draft.slackCommandAllowedCommands}
+                placeholder="/paperclip, /pc"
+                onChange={(event) => setDraft((current) => ({ ...current, slackCommandAllowedCommands: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Replay window (seconds)</Label>
+              <Input
+                value={draft.replayWindowSec}
+                onChange={(event) => setDraft((current) => ({ ...current, replayWindowSec: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Team id</Label>
+              <Input
+                value={draft.slackTeamId}
+                placeholder="T…"
+                onChange={(event) => setDraft((current) => ({ ...current, slackTeamId: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Allowed user ids (comma-separated)</Label>
+              <Input
+                value={draft.slackCommandAllowedUserIds}
+                placeholder="U12345, W67890"
+                onChange={(event) => setDraft((current) => ({ ...current, slackCommandAllowedUserIds: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Allowed channel ids (comma-separated)</Label>
+              <Input
+                value={draft.slackCommandAllowedChannelIds}
+                placeholder="C0987, G6543"
+                onChange={(event) => setDraft((current) => ({ ...current, slackCommandAllowedChannelIds: event.target.value }))}
+              />
+            </div>
+            <div className="md:col-span-2 space-y-1.5">
+              <Label className="text-xs">Ack message (shown to the invoker, ≤ 500 chars)</Label>
+              <Input
+                value={draft.slackCommandAckMessage}
+                placeholder={SLACK_COMMAND_DEFAULT_ACK_MESSAGE}
+                onChange={(event) => setDraft((current) => ({ ...current, slackCommandAckMessage: event.target.value }))}
+              />
+            </div>
+            <div className="md:col-span-2 space-y-1.5">
+              <Label className="text-xs">Signing secret (leave empty to keep current)</Label>
+              <Input
+                type="password"
+                value={draft.slackSigningSecret}
+                placeholder="Paste a new secret to rotate"
+                onChange={(event) => setDraft((current) => ({ ...current, slackSigningSecret: event.target.value }))}
+              />
+            </div>
+          </>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -390,6 +489,10 @@ export function RoutineDetail() {
     slackEventTypes: SLACK_EVENT_DEFAULT_TYPES.join(", "),
     slackBotUserId: "",
     slackTeamId: "",
+    slackCommandAllowedCommands: "",
+    slackCommandAllowedUserIds: "",
+    slackCommandAllowedChannelIds: "",
+    slackCommandAckMessage: "",
   });
   const [editDraft, setEditDraft] = useState<{
     title: string;
@@ -672,6 +775,32 @@ export function RoutineDetail() {
               .filter((value) => value.length > 0),
             botUserId: newTrigger.slackBotUserId.trim() || null,
             teamId: newTrigger.slackTeamId.trim() || null,
+            replayWindowSec: Number(newTrigger.replayWindowSec || "300"),
+          }
+          : {}),
+        ...(newTrigger.kind === "slack_command"
+          ? {
+            signingSecret: newTrigger.slackSigningSecret.trim(),
+            allowedCommands: newTrigger.slackCommandAllowedCommands
+              .split(",")
+              .map((value) => value.trim())
+              .filter((value) => value.length > 0),
+            allowedUserIds: (() => {
+              const list = newTrigger.slackCommandAllowedUserIds
+                .split(",")
+                .map((value) => value.trim())
+                .filter((value) => value.length > 0);
+              return list.length > 0 ? list : null;
+            })(),
+            allowedChannelIds: (() => {
+              const list = newTrigger.slackCommandAllowedChannelIds
+                .split(",")
+                .map((value) => value.trim())
+                .filter((value) => value.length > 0);
+              return list.length > 0 ? list : null;
+            })(),
+            teamId: newTrigger.slackTeamId.trim() || null,
+            ackMessage: newTrigger.slackCommandAckMessage.trim() || null,
             replayWindowSec: Number(newTrigger.replayWindowSec || "300"),
           }
           : {}),
@@ -1303,6 +1432,71 @@ export function RoutineDetail() {
                       onChange={(event) => setNewTrigger((current) => ({ ...current, slackTeamId: event.target.value }))}
                     />
                     <p className="text-xs text-muted-foreground">If set, only events from this workspace are accepted.</p>
+                  </div>
+                </>
+              )}
+              {newTrigger.kind === "slack_command" && (
+                <>
+                  <div className="md:col-span-2 space-y-1.5">
+                    <Label className="text-xs">Slack signing secret</Label>
+                    <Input
+                      type="password"
+                      value={newTrigger.slackSigningSecret}
+                      placeholder="From Slack app → Basic Information → Signing Secret"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackSigningSecret: event.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Paperclip stores this signed at rest and never displays it again.
+                    </p>
+                  </div>
+                  <div className="md:col-span-2 space-y-1.5">
+                    <Label className="text-xs">Allowed commands</Label>
+                    <Input
+                      value={newTrigger.slackCommandAllowedCommands}
+                      placeholder="/paperclip, /pc"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackCommandAllowedCommands: event.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground">Comma-separated. Each must start with <code>/</code> and match a command registered in your Slack app.</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Replay window (seconds)</Label>
+                    <Input
+                      value={newTrigger.replayWindowSec}
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, replayWindowSec: event.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Team id (optional)</Label>
+                    <Input
+                      value={newTrigger.slackTeamId}
+                      placeholder="T123ABC456"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackTeamId: event.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Allowed user ids (optional)</Label>
+                    <Input
+                      value={newTrigger.slackCommandAllowedUserIds}
+                      placeholder="U12345, W67890"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackCommandAllowedUserIds: event.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Allowed channel ids (optional)</Label>
+                    <Input
+                      value={newTrigger.slackCommandAllowedChannelIds}
+                      placeholder="C0987, G6543"
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackCommandAllowedChannelIds: event.target.value }))}
+                    />
+                  </div>
+                  <div className="md:col-span-2 space-y-1.5">
+                    <Label className="text-xs">Ack message (≤ 500 chars)</Label>
+                    <Input
+                      value={newTrigger.slackCommandAckMessage}
+                      placeholder={SLACK_COMMAND_DEFAULT_ACK_MESSAGE}
+                      onChange={(event) => setNewTrigger((current) => ({ ...current, slackCommandAckMessage: event.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground">Shown ephemerally to the invoker on success. Defaults to a generic message when empty.</p>
                   </div>
                 </>
               )}

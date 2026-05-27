@@ -38,6 +38,7 @@ import type {
   UpdateRoutineTrigger,
 } from "@paperclipai/shared";
 import {
+  SLACK_COMMAND_DEFAULT_ACK,
   WORKSPACE_BRANCH_ROUTINE_VARIABLE,
   getBuiltinRoutineVariableValues,
   extractRoutineVariableNames,
@@ -85,11 +86,17 @@ interface RoutineTriggerSecretRestoreMaterial extends RoutineTriggerSecretMateri
 
 type RoutineRunRow = typeof routineRuns.$inferSelect;
 
+export type SlackAckBody = {
+  response_type: "ephemeral" | "in_channel";
+  text: string;
+};
+
 export type FirePublicTriggerResult =
   | { kind: "run"; run: RoutineRunRow }
   | { kind: "url_verification"; challenge: string }
   | { kind: "ignored"; reason: string }
-  | { kind: "filtered"; reason: string };
+  | { kind: "filtered"; reason: string }
+  | { kind: "ack"; body: SlackAckBody };
 
 function routineWebhookSecretConfigPath(secretId: string) {
   return `webhookSecret:${secretId}`;
@@ -285,7 +292,7 @@ function assertRoutineCanEnable(status: string, assigneeAgentId: string | null |
 }
 
 function collectProvidedRoutineVariables(
-  source: "schedule" | "manual" | "api" | "webhook" | "slack_event",
+  source: "schedule" | "manual" | "api" | "webhook" | "slack_event" | "slack_command",
   payload: Record<string, unknown> | null | undefined,
   variables: Record<string, unknown> | null | undefined,
 ) {
@@ -302,7 +309,7 @@ function collectProvidedRoutineVariables(
 function resolveRoutineVariableValues(
   variables: RoutineVariable[],
   input: {
-    source: "schedule" | "manual" | "api" | "webhook" | "slack_event";
+    source: "schedule" | "manual" | "api" | "webhook" | "slack_event" | "slack_command";
     payload?: Record<string, unknown> | null;
     variables?: Record<string, unknown> | null;
     automaticVariables?: Record<string, string | number | boolean>;
@@ -392,6 +399,27 @@ function formatSlackVariables(envelope: Record<string, unknown> | null | undefin
     slack_thread_ts: stringFromRecord(event, "thread_ts") || ts,
     slack_team_id: stringFromRecord(envelope, "team_id"),
     slack_event_id: stringFromRecord(envelope, "event_id"),
+  };
+}
+
+function formatSlackCommandVariables(form: Record<string, unknown> | null | undefined): Record<string, string> {
+  const userId = stringFromRecord(form ?? null, "user_id");
+  const channelId = stringFromRecord(form ?? null, "channel_id");
+  return {
+    slack_command: stringFromRecord(form ?? null, "command"),
+    slack_text: stringFromRecord(form ?? null, "text"),
+    // slack_user aliases user_id for parity with slack_event templates.
+    slack_user: userId,
+    slack_user_id: userId,
+    slack_user_name: stringFromRecord(form ?? null, "user_name"),
+    slack_channel: channelId,
+    slack_channel_id: channelId,
+    slack_channel_name: stringFromRecord(form ?? null, "channel_name"),
+    slack_team_id: stringFromRecord(form ?? null, "team_id"),
+    slack_trigger_id: stringFromRecord(form ?? null, "trigger_id"),
+    slack_response_url: stringFromRecord(form ?? null, "response_url"),
+    slack_thread_ts: "",
+    slack_event_id: "",
   };
 }
 
@@ -1204,6 +1232,93 @@ export function routineService(
     return { kind: "run", run };
   }
 
+  async function handleSlackCommandTrigger(
+    trigger: RoutineTriggerRow,
+    routine: RoutineRow,
+    input: {
+      slackSignatureHeader?: string | null;
+      slackTimestampHeader?: string | null;
+      rawBody?: Buffer | null;
+      payload?: Record<string, unknown> | null;
+    },
+  ): Promise<FirePublicTriggerResult> {
+    const providedSignature = input.slackSignatureHeader?.trim() ?? "";
+    const providedTimestamp = input.slackTimestampHeader?.trim() ?? "";
+    if (!providedSignature || !providedTimestamp) throw unauthorized();
+    if (!/^\d+$/.test(providedTimestamp)) throw unauthorized();
+    const tsSeconds = Number.parseInt(providedTimestamp, 10);
+    if (!Number.isFinite(tsSeconds)) throw unauthorized();
+    const replayWindowSec = trigger.replayWindowSec ?? 300;
+    if (Math.abs(Date.now() / 1000 - tsSeconds) > replayWindowSec) {
+      throw unauthorized();
+    }
+
+    const rawBody = input.rawBody ?? Buffer.alloc(0);
+    const secretValue = await resolveTriggerSecret(trigger, routine.companyId);
+    const expectedHmac = crypto
+      .createHmac("sha256", secretValue)
+      .update(`v0:${providedTimestamp}:`)
+      .update(rawBody)
+      .digest("hex");
+    const normalizedSignature = providedSignature.replace(/^v0=/, "");
+    const expectedBuf = Buffer.from(expectedHmac);
+    const providedBuf = Buffer.from(normalizedSignature);
+    const valid =
+      providedBuf.length === expectedBuf.length &&
+      crypto.timingSafeEqual(providedBuf, expectedBuf);
+    if (!valid) throw unauthorized();
+
+    const form = input.payload ?? {};
+    const command = stringFromRecord(form, "command");
+    const allowedCommands = trigger.allowedCommands ?? [];
+    if (allowedCommands.length === 0 || !allowedCommands.includes(command)) {
+      return { kind: "filtered", reason: `command:${command || "unknown"}` };
+    }
+    if (trigger.teamId) {
+      const formTeam = stringFromRecord(form, "team_id");
+      if (formTeam !== trigger.teamId) {
+        return { kind: "filtered", reason: "team_id_mismatch" };
+      }
+    }
+    const allowedUserIds = trigger.allowedUserIds ?? [];
+    if (allowedUserIds.length > 0) {
+      const userId = stringFromRecord(form, "user_id");
+      if (!allowedUserIds.includes(userId)) {
+        return { kind: "filtered", reason: "user_not_allowed" };
+      }
+    }
+    const allowedChannelIds = trigger.allowedChannelIds ?? [];
+    if (allowedChannelIds.length > 0) {
+      const channelId = stringFromRecord(form, "channel_id");
+      if (!allowedChannelIds.includes(channelId)) {
+        return { kind: "filtered", reason: "channel_not_allowed" };
+      }
+    }
+
+    const triggerId = stringFromRecord(form, "trigger_id");
+    const idempotencyKey = triggerId.length > 0 ? triggerId : null;
+    const ackText = (trigger.ackMessage ?? "").trim() || SLACK_COMMAND_DEFAULT_ACK;
+    const ackBody: SlackAckBody = { response_type: "ephemeral", text: ackText };
+
+    // Fire-and-forget dispatch so the 3s Slack ack window is never blocked
+    // by issue creation. The run row is written by dispatchRoutineRun and
+    // shows up in the UI within a few milliseconds of the ack returning.
+    void dispatchRoutineRun({
+      routine,
+      trigger,
+      source: "slack_command",
+      payload: form,
+      idempotencyKey,
+    }).catch((err) => {
+      logger.error(
+        { err, routineId: routine.id, triggerId: trigger.id, slackTriggerId: triggerId },
+        "slack_command dispatch failed",
+      );
+    });
+
+    return { kind: "ack", body: ackBody };
+  }
+
   async function touchIssueForUserInbox(
     executor: Db,
     input: {
@@ -1244,7 +1359,7 @@ export function routineService(
   async function dispatchRoutineRun(input: {
     routine: typeof routines.$inferSelect;
     trigger: typeof routineTriggers.$inferSelect | null;
-    source: "schedule" | "manual" | "api" | "webhook" | "slack_event";
+    source: "schedule" | "manual" | "api" | "webhook" | "slack_event" | "slack_command";
     payload?: Record<string, unknown> | null;
     variables?: Record<string, unknown> | null;
     projectId?: string | null;
@@ -1261,11 +1376,14 @@ export function routineService(
       throw unprocessable("Default agent required");
     }
     const automaticVariables: Record<string, string | number | boolean> = {};
-    if (input.source === "webhook" || input.source === "slack_event") {
+    if (input.source === "webhook" || input.source === "slack_event" || input.source === "slack_command") {
       automaticVariables.payload = formatWebhookPayloadForVariable(input.payload);
     }
     if (input.source === "slack_event") {
       Object.assign(automaticVariables, formatSlackVariables(input.payload ?? null));
+    }
+    if (input.source === "slack_command") {
+      Object.assign(automaticVariables, formatSlackCommandVariables(input.payload ?? null));
     }
     if (input.executionWorkspaceId && routineUsesWorkspaceBranch(input.routine)) {
       const workspace = await db
@@ -1884,6 +2002,19 @@ export function routineService(
         };
       }
 
+      if (input.kind === "slack_command") {
+        publicId = crypto.randomBytes(12).toString("hex");
+        const created = await createWebhookSecret(routine.companyId, routine.id, actor, undefined, {
+          valueOverride: input.signingSecret,
+          description: `Slack slash command signing secret for routine ${routine.id}`,
+        });
+        secretId = created.secret.id;
+        secretMaterial = {
+          webhookUrl: `${process.env.PAPERCLIP_API_URL}/api/routine-triggers/public/${publicId}/fire`,
+          webhookSecret: "",
+        };
+      }
+
       const { trigger, revision } = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${routine.id} for update`);
@@ -1903,17 +2034,27 @@ export function routineService(
             signingMode:
               input.kind === "webhook"
                 ? input.signingMode
-                : input.kind === "slack_event"
+                : input.kind === "slack_event" || input.kind === "slack_command"
                   ? "slack_v0"
                   : null,
             replayWindowSec:
-              input.kind === "webhook" || input.kind === "slack_event"
+              input.kind === "webhook" || input.kind === "slack_event" || input.kind === "slack_command"
                 ? input.replayWindowSec
                 : null,
             allowedEventTypes: input.kind === "slack_event" ? input.allowedEventTypes : null,
             botUserId: input.kind === "slack_event" ? input.botUserId ?? null : null,
-            teamId: input.kind === "slack_event" ? input.teamId ?? null : null,
-            lastRotatedAt: input.kind === "webhook" || input.kind === "slack_event" ? new Date() : null,
+            teamId:
+              input.kind === "slack_event" || input.kind === "slack_command"
+                ? input.teamId ?? null
+                : null,
+            allowedCommands: input.kind === "slack_command" ? input.allowedCommands : null,
+            allowedUserIds: input.kind === "slack_command" ? input.allowedUserIds ?? null : null,
+            allowedChannelIds: input.kind === "slack_command" ? input.allowedChannelIds ?? null : null,
+            ackMessage: input.kind === "slack_command" ? input.ackMessage ?? null : null,
+            lastRotatedAt:
+              input.kind === "webhook" || input.kind === "slack_event" || input.kind === "slack_command"
+                ? new Date()
+                : null,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
             updatedByAgentId: actor.agentId ?? null,
@@ -1970,12 +2111,15 @@ export function routineService(
 
       let nextSecretId = existing.secretId;
       let lastRotatedAt = existing.lastRotatedAt;
-      if (existing.kind === "slack_event" && patch.signingSecret) {
+      if ((existing.kind === "slack_event" || existing.kind === "slack_command") && patch.signingSecret) {
         const routine = await getRoutineById(existing.routineId);
         if (!routine) throw notFound("Routine not found");
+        const description = existing.kind === "slack_event"
+          ? `Slack Events API signing secret for routine ${routine.id}`
+          : `Slack slash command signing secret for routine ${routine.id}`;
         const created = await createWebhookSecret(routine.companyId, routine.id, actor, undefined, {
           valueOverride: patch.signingSecret,
-          description: `Slack Events API signing secret for routine ${routine.id}`,
+          description,
         });
         nextSecretId = created.secret.id;
         lastRotatedAt = new Date();
@@ -1988,7 +2132,18 @@ export function routineService(
           botUserId: patch.botUserId === undefined ? existing.botUserId : patch.botUserId,
           teamId: patch.teamId === undefined ? existing.teamId : patch.teamId,
         }
-        : {};
+        : existing.kind === "slack_command"
+          ? {
+            allowedCommands:
+              patch.allowedCommands === undefined ? existing.allowedCommands : patch.allowedCommands,
+            allowedUserIds:
+              patch.allowedUserIds === undefined ? existing.allowedUserIds : patch.allowedUserIds,
+            allowedChannelIds:
+              patch.allowedChannelIds === undefined ? existing.allowedChannelIds : patch.allowedChannelIds,
+            ackMessage: patch.ackMessage === undefined ? existing.ackMessage : patch.ackMessage,
+            teamId: patch.teamId === undefined ? existing.teamId : patch.teamId,
+          }
+          : {};
 
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
@@ -2310,7 +2465,7 @@ export function routineService(
         .where(eq(routineTriggers.publicId, publicId))
         .then((rows) => rows[0] ?? null);
       if (!trigger) throw notFound("Routine trigger not found");
-      if (trigger.kind !== "webhook" && trigger.kind !== "slack_event") {
+      if (trigger.kind !== "webhook" && trigger.kind !== "slack_event" && trigger.kind !== "slack_command") {
         throw notFound("Routine trigger not found");
       }
       const routine = await getRoutineById(trigger.routineId);
@@ -2319,6 +2474,9 @@ export function routineService(
 
       if (trigger.kind === "slack_event") {
         return handleSlackEventTrigger(trigger, routine, input);
+      }
+      if (trigger.kind === "slack_command") {
+        return handleSlackCommandTrigger(trigger, routine, input);
       }
 
       if (trigger.signingMode === "none") {

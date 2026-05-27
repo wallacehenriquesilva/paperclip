@@ -1,4 +1,4 @@
-import { Router, type Request } from "express";
+import express, { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import {
   createRoutineSchema,
@@ -15,6 +15,28 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unauthorized } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+
+function parsePublicTriggerBody(rawBody: Buffer, contentType: string): Record<string, unknown> | null {
+  if (rawBody.length === 0) return null;
+  const lowered = contentType.toLowerCase();
+  if (lowered.includes("application/x-www-form-urlencoded")) {
+    const params = new URLSearchParams(rawBody.toString("utf8"));
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of params.entries()) {
+      out[key] = value;
+    }
+    return out;
+  }
+  // Default to JSON for application/json and anything else (matches the
+  // previous express.json behavior). Empty/invalid JSON falls back to null
+  // so signature verification still runs against the raw bytes downstream.
+  try {
+    const parsed = JSON.parse(rawBody.toString("utf8"));
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
 
 export function routineRoutes(
   db: Db,
@@ -437,32 +459,49 @@ export function routineRoutes(
     res.status(202).json(run);
   });
 
-  router.post("/routine-triggers/public/:publicId/fire", async (req, res) => {
-    const result = await svc.firePublicTrigger(req.params.publicId as string, {
-      authorizationHeader: req.header("authorization"),
-      signatureHeader: req.header("x-paperclip-signature"),
-      hubSignatureHeader: req.header("x-hub-signature-256"),
-      slackSignatureHeader: req.header("x-slack-signature"),
-      slackTimestampHeader: req.header("x-slack-request-timestamp"),
-      slackRetryNumHeader: req.header("x-slack-retry-num"),
-      timestampHeader: req.header("x-paperclip-timestamp"),
-      idempotencyKey: req.header("idempotency-key"),
-      rawBody: (req as { rawBody?: Buffer }).rawBody ?? null,
-      payload: typeof req.body === "object" && req.body !== null ? req.body as Record<string, unknown> : null,
-    });
-    switch (result.kind) {
-      case "url_verification":
-        res.status(200).json({ challenge: result.challenge });
-        return;
-      case "ignored":
-      case "filtered":
-        res.status(200).end();
-        return;
-      case "run":
-        res.status(202).json(result.run);
-        return;
-    }
-  });
+  // Public webhook + Slack endpoints need raw-body access for signature
+  // verification. We capture raw bytes for ANY content-type on this route
+  // and parse JSON or url-encoded forms ourselves so the global
+  // express.json() (which only accepts application/json) does not
+  // pre-consume the body and so slash commands
+  // (application/x-www-form-urlencoded) work.
+  const publicTriggerRawBody = express.raw({ type: () => true, limit: "1mb" });
+  router.post(
+    "/routine-triggers/public/:publicId/fire",
+    publicTriggerRawBody,
+    async (req, res) => {
+      const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const contentType = req.header("content-type") ?? "";
+      const payload = parsePublicTriggerBody(rawBody, contentType);
+      const result = await svc.firePublicTrigger(req.params.publicId as string, {
+        authorizationHeader: req.header("authorization"),
+        signatureHeader: req.header("x-paperclip-signature"),
+        hubSignatureHeader: req.header("x-hub-signature-256"),
+        slackSignatureHeader: req.header("x-slack-signature"),
+        slackTimestampHeader: req.header("x-slack-request-timestamp"),
+        slackRetryNumHeader: req.header("x-slack-retry-num"),
+        timestampHeader: req.header("x-paperclip-timestamp"),
+        idempotencyKey: req.header("idempotency-key"),
+        rawBody,
+        payload,
+      });
+      switch (result.kind) {
+        case "url_verification":
+          res.status(200).json({ challenge: result.challenge });
+          return;
+        case "ignored":
+        case "filtered":
+          res.status(200).end();
+          return;
+        case "run":
+          res.status(202).json(result.run);
+          return;
+        case "ack":
+          res.status(200).json(result.body);
+          return;
+      }
+    },
+  );
 
   return router;
 }

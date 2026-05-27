@@ -154,6 +154,10 @@ export interface RoutineTrigger {
   allowedEventTypes: string[] | null;
   botUserId: string | null;
   teamId: string | null;
+  allowedCommands: string[] | null;
+  allowedUserIds: string[] | null;
+  allowedChannelIds: string[] | null;
+  ackMessage: string | null;
   lastRotatedAt: Date | null;
   lastResult: string | null;
   createdByAgentId: string | null;
