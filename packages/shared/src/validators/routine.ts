@@ -7,6 +7,8 @@ import {
   ROUTINE_TRIGGER_KINDS,
   ROUTINE_TRIGGER_SIGNING_MODES,
   ROUTINE_VARIABLE_TYPES,
+  SLACK_COMMAND_MAX_ACK_LENGTH,
+  SLACK_COMMAND_NAME_PATTERN,
   SLACK_EVENT_TRIGGER_DEFAULT_EVENT_TYPES,
 } from "../constants.js";
 import {
@@ -118,6 +120,7 @@ const baseTriggerSchema = z.object({
 
 const SLACK_USER_ID_PATTERN = /^[UW][A-Z0-9]+$/;
 const SLACK_TEAM_ID_PATTERN = /^T[A-Z0-9]+$/;
+const SLACK_CHANNEL_ID_PATTERN = /^[CGD][A-Z0-9]+$/;
 
 export const createRoutineTriggerSchema = z.discriminatedUnion("kind", [
   baseTriggerSchema.extend({
@@ -146,6 +149,27 @@ export const createRoutineTriggerSchema = z.discriminatedUnion("kind", [
     teamId: z.string().trim().regex(SLACK_TEAM_ID_PATTERN).optional().nullable(),
     replayWindowSec: z.number().int().min(30).max(86_400).optional().default(300),
   }),
+  baseTriggerSchema.extend({
+    kind: z.literal("slack_command"),
+    signingSecret: z.string().trim().min(1).max(2048),
+    allowedCommands: z
+      .array(z.string().trim().regex(SLACK_COMMAND_NAME_PATTERN))
+      .min(1, "configure at least one slash command name")
+      .max(50),
+    allowedUserIds: z
+      .array(z.string().trim().regex(SLACK_USER_ID_PATTERN))
+      .max(200)
+      .optional()
+      .nullable(),
+    allowedChannelIds: z
+      .array(z.string().trim().regex(SLACK_CHANNEL_ID_PATTERN))
+      .max(200)
+      .optional()
+      .nullable(),
+    teamId: z.string().trim().regex(SLACK_TEAM_ID_PATTERN).optional().nullable(),
+    ackMessage: z.string().trim().max(SLACK_COMMAND_MAX_ACK_LENGTH).optional().nullable(),
+    replayWindowSec: z.number().int().min(30).max(86_400).optional().default(300),
+  }),
 ]);
 
 export type CreateRoutineTrigger = z.infer<typeof createRoutineTriggerSchema>;
@@ -161,6 +185,23 @@ export const updateRoutineTriggerSchema = z.object({
   allowedEventTypes: z.array(z.string().trim().min(1).max(120)).min(1).max(50).optional().nullable(),
   botUserId: z.string().trim().regex(SLACK_USER_ID_PATTERN).optional().nullable(),
   teamId: z.string().trim().regex(SLACK_TEAM_ID_PATTERN).optional().nullable(),
+  allowedCommands: z
+    .array(z.string().trim().regex(SLACK_COMMAND_NAME_PATTERN))
+    .min(1)
+    .max(50)
+    .optional()
+    .nullable(),
+  allowedUserIds: z
+    .array(z.string().trim().regex(SLACK_USER_ID_PATTERN))
+    .max(200)
+    .optional()
+    .nullable(),
+  allowedChannelIds: z
+    .array(z.string().trim().regex(SLACK_CHANNEL_ID_PATTERN))
+    .max(200)
+    .optional()
+    .nullable(),
+  ackMessage: z.string().trim().max(SLACK_COMMAND_MAX_ACK_LENGTH).optional().nullable(),
 });
 
 export type UpdateRoutineTrigger = z.infer<typeof updateRoutineTriggerSchema>;

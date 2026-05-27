@@ -54,11 +54,20 @@ describe("routine variable helpers", () => {
     expect(isBuiltinRoutineVariable("slack_thread_ts")).toBe(true);
     expect(isBuiltinRoutineVariable("slack_team_id")).toBe(true);
     expect(isBuiltinRoutineVariable("slack_event_id")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_command")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_user_id")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_user_name")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_channel_id")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_channel_name")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_trigger_id")).toBe(true);
+    expect(isBuiltinRoutineVariable("slack_response_url")).toBe(true);
     expect(isBuiltinRoutineVariable("repo")).toBe(false);
     expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("date")).toBe(true);
     expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("timestamp")).toBe(true);
     expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("payload")).toBe(true);
     expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("slack_event_id")).toBe(true);
+    expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("slack_command")).toBe(true);
+    expect(BUILTIN_ROUTINE_VARIABLE_NAMES.has("slack_response_url")).toBe(true);
   });
 
   it("getBuiltinRoutineVariableValues defaults payload and slack_* to empty strings", () => {
@@ -70,6 +79,13 @@ describe("routine variable helpers", () => {
     expect(values.slack_thread_ts).toBe("");
     expect(values.slack_team_id).toBe("");
     expect(values.slack_event_id).toBe("");
+    expect(values.slack_command).toBe("");
+    expect(values.slack_user_id).toBe("");
+    expect(values.slack_user_name).toBe("");
+    expect(values.slack_channel_id).toBe("");
+    expect(values.slack_channel_name).toBe("");
+    expect(values.slack_trigger_id).toBe("");
+    expect(values.slack_response_url).toBe("");
   });
 
   it("getBuiltinRoutineVariableValues returns date in YYYY-MM-DD format", () => {
