@@ -111,7 +111,11 @@ function resolvePathWithinRoot(rootPath: string, relativePath: string): string {
   return absolutePath;
 }
 
-export function resolveManagedScriptsRoot(agent: AgentLike): string {
+export function resolveManagedScriptsRoot(agent: AgentLike): string | null {
+  // Callers that derive a default root for a freshly-loaded agent shouldn't
+  // crash on test fixtures or transient rows without identity. Return null
+  // and let callers treat the bundle as "not yet materialized".
+  if (!agent.companyId || !agent.id) return null;
   return path.resolve(
     resolvePaperclipInstanceRoot(),
     "companies",
@@ -191,7 +195,7 @@ async function readSummary(
   };
 }
 
-function deriveBundleState(agent: AgentLike): { rootPath: string; entryFile: string } {
+function deriveBundleState(agent: AgentLike): { rootPath: string | null; entryFile: string } {
   const config = asRecord(agent.adapterConfig);
   const rootRaw = asString(config[ROOT_KEY]);
   const entryRaw = asString(config[ENTRY_KEY]);
@@ -207,6 +211,15 @@ function deriveBundleState(agent: AgentLike): { rootPath: string; entryFile: str
     rootPath: rootRaw ?? resolveManagedScriptsRoot(agent),
     entryFile,
   };
+}
+
+function requireRootPath(rootPath: string | null): string {
+  if (!rootPath) {
+    throw unprocessable(
+      "Agent script bundle root is not configured (agent is missing companyId/id).",
+    );
+  }
+  return rootPath;
 }
 
 function applyBundleConfig(
@@ -233,24 +246,26 @@ async function ensureBundleSeed(rootPath: string, entryFile: string): Promise<vo
 export function agentScriptsService() {
   async function getBundle(agent: AgentLike): Promise<AgentScriptBundle> {
     const state = deriveBundleState(agent);
-    await ensureBundleSeed(state.rootPath, state.entryFile);
-    const relativePaths = await listFilesRecursive(state.rootPath);
+    const rootPath = requireRootPath(state.rootPath);
+    await ensureBundleSeed(rootPath, state.entryFile);
+    const relativePaths = await listFilesRecursive(rootPath);
     const files = await Promise.all(
-      relativePaths.map((relativePath) => readSummary(state.rootPath, relativePath, state.entryFile)),
+      relativePaths.map((relativePath) => readSummary(rootPath, relativePath, state.entryFile)),
     );
     return {
       agentId: agent.id,
       companyId: agent.companyId,
-      rootPath: state.rootPath,
+      rootPath,
       entryFile: state.entryFile,
-      entryFilePath: path.resolve(state.rootPath, state.entryFile),
+      entryFilePath: path.resolve(rootPath, state.entryFile),
       files,
     };
   }
 
   async function readFile(agent: AgentLike, relativePath: string): Promise<AgentScriptFileDetail> {
     const state = deriveBundleState(agent);
-    const absolutePath = resolvePathWithinRoot(state.rootPath, relativePath);
+    const rootPath = requireRootPath(state.rootPath);
+    const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
     const [content, stat] = await Promise.all([
       fs.readFile(absolutePath, "utf8").catch(() => null),
       fs.stat(absolutePath).catch(() => null),
@@ -277,13 +292,14 @@ export function agentScriptsService() {
     adapterConfig: Record<string, unknown>;
   }> {
     const state = deriveBundleState(agent);
-    await fs.mkdir(state.rootPath, { recursive: true });
-    const absolutePath = resolvePathWithinRoot(state.rootPath, relativePath);
+    const rootPath = requireRootPath(state.rootPath);
+    await fs.mkdir(rootPath, { recursive: true });
+    const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, content, "utf8");
     await applyExecutableMode(absolutePath, content);
 
-    const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), state);
+    const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), { rootPath, entryFile: state.entryFile });
     const nextAgent = { ...agent, adapterConfig };
     const [bundle, file] = await Promise.all([
       getBundle(nextAgent),
@@ -297,13 +313,14 @@ export function agentScriptsService() {
     relativePath: string,
   ): Promise<{ bundle: AgentScriptBundle; adapterConfig: Record<string, unknown> }> {
     const state = deriveBundleState(agent);
+    const rootPath = requireRootPath(state.rootPath);
     const normalizedPath = normalizeRelativeFilePath(relativePath);
     if (normalizedPath === state.entryFile) {
       throw unprocessable("Cannot delete the script bundle entry file");
     }
-    const absolutePath = resolvePathWithinRoot(state.rootPath, normalizedPath);
+    const absolutePath = resolvePathWithinRoot(rootPath, normalizedPath);
     await fs.rm(absolutePath, { force: true });
-    const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), state);
+    const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), { rootPath, entryFile: state.entryFile });
     const bundle = await getBundle({ ...agent, adapterConfig });
     return { bundle, adapterConfig };
   }
@@ -313,12 +330,13 @@ export function agentScriptsService() {
     input: { entryFile?: string },
   ): Promise<{ bundle: AgentScriptBundle; adapterConfig: Record<string, unknown> }> {
     const state = deriveBundleState(agent);
+    const rootPath = requireRootPath(state.rootPath);
     const nextEntry = input.entryFile
       ? normalizeRelativeFilePath(input.entryFile)
       : state.entryFile;
-    await ensureBundleSeed(state.rootPath, nextEntry);
+    await ensureBundleSeed(rootPath, nextEntry);
     const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), {
-      rootPath: state.rootPath,
+      rootPath,
       entryFile: nextEntry,
     });
     const bundle = await getBundle({ ...agent, adapterConfig });
@@ -335,7 +353,7 @@ export function agentScriptsService() {
     files: Record<string, string>,
     options?: { replaceExisting?: boolean; entryFile?: string },
   ): Promise<{ bundle: AgentScriptBundle; adapterConfig: Record<string, unknown> }> {
-    const rootPath = resolveManagedScriptsRoot(agent);
+    const rootPath = requireRootPath(resolveManagedScriptsRoot(agent));
     const entryFile = options?.entryFile
       ? normalizeRelativeFilePath(options.entryFile)
       : DEFAULT_ENTRY_FILE;
@@ -362,14 +380,19 @@ export function agentScriptsService() {
 
   /**
    * Read the on-disk bundle and return a `{path: content}` map suitable for
-   * inclusion in a portability export.
+   * inclusion in a portability export. Silently returns an empty map for
+   * agents that never materialized a bundle (e.g. test fixtures without a
+   * managed root, or new agents that haven't opened the Scripts tab yet).
    */
   async function exportFiles(agent: AgentLike): Promise<{
     files: Record<string, string>;
     entryFile: string;
-    rootPath: string;
+    rootPath: string | null;
   }> {
     const state = deriveBundleState(agent);
+    if (!state.rootPath) {
+      return { files: {}, entryFile: state.entryFile, rootPath: null };
+    }
     const stat = await statIfExists(state.rootPath);
     if (!stat?.isDirectory()) {
       return { files: {}, entryFile: state.entryFile, rootPath: state.rootPath };
@@ -378,7 +401,7 @@ export function agentScriptsService() {
     const files = Object.fromEntries(
       await Promise.all(
         relativePaths.map(async (relativePath) => {
-          const absolutePath = resolvePathWithinRoot(state.rootPath, relativePath);
+          const absolutePath = resolvePathWithinRoot(state.rootPath!, relativePath);
           const content = await fs.readFile(absolutePath, "utf8");
           return [relativePath, content] as const;
         }),
@@ -396,19 +419,20 @@ export function agentScriptsService() {
     agent: AgentLike,
   ): Promise<{ rootPath: string; entryFile: string; entryFilePath: string }> {
     const state = deriveBundleState(agent);
-    await ensureBundleSeed(state.rootPath, state.entryFile);
+    const rootPath = requireRootPath(state.rootPath);
+    await ensureBundleSeed(rootPath, state.entryFile);
     // Re-apply chmod +x on every file with a shebang — covers the case
     // where the volume lost the executable bit (e.g. after a restore).
-    const relativePaths = await listFilesRecursive(state.rootPath);
+    const relativePaths = await listFilesRecursive(rootPath);
     for (const relativePath of relativePaths) {
-      const absolutePath = resolvePathWithinRoot(state.rootPath, relativePath);
+      const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
       const content = await fs.readFile(absolutePath, "utf8").catch(() => "");
       await applyExecutableMode(absolutePath, content);
     }
     return {
-      rootPath: state.rootPath,
+      rootPath,
       entryFile: state.entryFile,
-      entryFilePath: path.resolve(state.rootPath, state.entryFile),
+      entryFilePath: path.resolve(rootPath, state.entryFile),
     };
   }
 
