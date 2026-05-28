@@ -168,6 +168,56 @@ describeEmbeddedPostgres("secretService", () => {
     });
   });
 
+  it("resolves secret-backed HTTP headers in adapter config for runtime", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `webhook-token-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "bearer-xyz",
+    });
+    const headers = {
+      "Authorization": {
+        type: "secret_ref" as const,
+        secretId: secret.id,
+        version: "latest" as const,
+      },
+      "X-Trace-Id": { type: "plain" as const, value: "abc" },
+    };
+
+    // Header names use token chars (e.g. dashes) and must normalize/persist.
+    const normalized = await svc.normalizeAdapterConfigForPersistence(companyId, { headers });
+    expect(normalized.headers).toBeTruthy();
+
+    await svc.syncEnvBindingsForTarget(
+      companyId,
+      { targetType: "agent", targetId: "agent-1", pathPrefix: "headers" },
+      headers,
+    );
+
+    // Without a matching binding the resolution must be rejected.
+    await expect(
+      svc.resolveAdapterConfigForRuntime(companyId, { headers }, {
+        consumerType: "agent",
+        consumerId: "agent-2",
+        actorType: "agent",
+        actorId: "agent-2",
+      }),
+    ).rejects.toThrow(/not bound/i);
+
+    const resolved = await svc.resolveAdapterConfigForRuntime(companyId, { headers }, {
+      consumerType: "agent",
+      consumerId: "agent-1",
+      actorType: "agent",
+      actorId: "agent-1",
+    });
+
+    const resolvedHeaders = resolved.config.headers as Record<string, string>;
+    expect(resolvedHeaders.Authorization).toBe("bearer-xyz");
+    expect(resolvedHeaders["X-Trace-Id"]).toBe("abc");
+    expect(resolved.secretKeys.has("Authorization")).toBe(true);
+  });
+
   it("enforces binding context and records value-free access events", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);

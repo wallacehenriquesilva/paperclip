@@ -69,11 +69,15 @@ export function EnvVarEditor({
   secrets,
   onCreateSecret,
   onChange,
+  keyPlaceholder = "KEY",
+  description = "Set KEY to the env var name the process expects, for example GH_TOKEN. Choose Secret to resolve a stored value at run start. PAPERCLIP_* variables are injected automatically.",
 }: {
   value: Record<string, EnvBinding>;
   secrets: CompanySecret[];
   onCreateSecret: (name: string, value: string) => Promise<CompanySecret>;
   onChange: (env: Record<string, EnvBinding> | undefined) => void;
+  keyPlaceholder?: string;
+  description?: string;
 }) {
   const [rows, setRows] = useState<Row[]>(() => toRows(value));
   const [sealError, setSealError] = useState<string | null>(null);
@@ -181,7 +185,7 @@ export function EnvVarEditor({
           <div key={index} className="flex items-center gap-1.5">
             <input
               className={cn(inputClass, "flex-[2]")}
-              placeholder="KEY"
+              placeholder={keyPlaceholder}
               value={row.key}
               onChange={(event) => updateRow(index, { key: event.target.value })}
             />
@@ -314,10 +318,7 @@ export function EnvVarEditor({
           </p>
         );
       })()}
-      <p className="text-[11px] text-muted-foreground/60">
-        Set KEY to the env var name the process expects, for example GH_TOKEN. Choose Secret to resolve a stored
-        value at run start. PAPERCLIP_* variables are injected automatically.
-      </p>
+      <p className="text-[11px] text-muted-foreground/60">{description}</p>
     </div>
   );
 }

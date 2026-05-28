@@ -6,11 +6,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const url = asString(config.url, "");
   if (!url) throw new Error("HTTP adapter missing url");
 
-  const method = asString(config.method, "POST");
+  const method = asString(config.method, "POST").trim().toUpperCase() || "POST";
   const timeoutMs = asNumber(config.timeoutMs, 0);
   const headers = parseObject(config.headers) as Record<string, string>;
   const payloadTemplate = parseObject(config.payloadTemplate);
-  const body = { ...payloadTemplate, agentId: agent.id, runId, context };
+
+  // GET/HEAD requests cannot carry a body — fetch throws if one is provided.
+  const sendsBody = method !== "GET" && method !== "HEAD";
+  const body = sendsBody
+    ? JSON.stringify({ ...payloadTemplate, agentId: agent.id, runId, context })
+    : undefined;
 
   const controller = new AbortController();
   const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -19,10 +24,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const res = await fetch(url, {
       method,
       headers: {
-        "content-type": "application/json",
+        ...(sendsBody ? { "content-type": "application/json" } : {}),
         ...headers,
       },
-      body: JSON.stringify(body),
+      ...(body !== undefined ? { body } : {}),
       ...(timer ? { signal: controller.signal } : {}),
     });
 

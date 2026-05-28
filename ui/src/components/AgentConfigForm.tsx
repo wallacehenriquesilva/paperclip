@@ -316,7 +316,11 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const getCapabilities = useAdapterCapabilities();
   const adapterCaps = getCapabilities(adapterType);
   const isLocal = adapterCaps.supportsInstructionsBundle || adapterCaps.supportsSkills || adapterCaps.supportsLocalAgentJwt;
-  
+  // Config-driven built-ins (http/process) don't run a local agent session but
+  // still need their adapter-specific config form rendered.
+  const isConfigDrivenAdapter = adapterType === "http" || adapterType === "process";
+  const supportsEnvAndTimeoutFields = isLocal || adapterType === "process";
+
   const showLegacyWorkingDirectoryField =
     isLocal && shouldShowLegacyWorkingDirectoryField({ isCreate, adapterConfig: config });
   const uiAdapter = useMemo(() => getUIAdapter(adapterType), [adapterType]);
@@ -412,6 +416,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     mark: mark as (group: "adapterConfig", field: string, value: unknown) => void,
     models,
     hideInstructionsFile,
+    secrets: availableSecrets,
+    onCreateSecret: async (name: string, value: string) => createSecret.mutateAsync({ name, value }),
   };
 
   // Section toggle state — advanced always starts collapsed
@@ -938,13 +944,15 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       </div>
 
       {/* ---- Permissions & Configuration ---- */}
-      {isLocal && (
+      {(isLocal || isConfigDrivenAdapter) && (
         <div className={cn(!cards && "border-b border-border")}>
           {cards
             ? <h3 className="text-sm font-medium mb-3">Permissions &amp; Configuration</h3>
             : <div className="px-4 py-2 text-xs font-medium text-muted-foreground">Permissions &amp; Configuration</div>
           }
           <div className={cn(cards ? "border border-border rounded-lg p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
+              {isLocal && (
+              <>
               <Field label="Command" hint={help.localCommand}>
                 <DraftInput
                   value={
@@ -1095,8 +1103,11 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               {adapterType === "claude_local" && (
                 <ClaudeLocalAdvancedFields {...adapterFieldProps} />
               )}
+              </>
+              )}
               <uiAdapter.ConfigFields {...adapterFieldProps} />
 
+              {isLocal && (
               <Field label="Extra args (comma-separated)" hint={help.extraArgs}>
                 <DraftInput
                   value={
@@ -1114,7 +1125,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   placeholder="e.g. --verbose, --foo=bar"
                 />
               </Field>
+              )}
 
+              {supportsEnvAndTimeoutFields && (
               <Field label="Environment variables" hint={help.envVars}>
                 <EnvVarEditor
                   value={
@@ -1135,9 +1148,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   }
                 />
               </Field>
+              )}
 
               {/* Edit-only: timeout + grace period */}
-              {!isCreate && (
+              {!isCreate && supportsEnvAndTimeoutFields && (
                 <>
                   <Field label="Timeout (sec)" hint={help.timeoutSec}>
                     <DraftNumberInput
