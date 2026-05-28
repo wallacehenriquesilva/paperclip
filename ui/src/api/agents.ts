@@ -3,6 +3,8 @@ import type {
   AgentDetail,
   AgentInstructionsBundle,
   AgentInstructionsFileDetail,
+  AgentScriptBundle,
+  AgentScriptFileDetail,
   AgentSkillSnapshot,
   AdapterEnvironmentTestResult,
   AgentKeyCreated,
@@ -159,6 +161,23 @@ export const agentsApi = {
   deleteInstructionsFile: (id: string, relativePath: string, companyId?: string) =>
     api.delete<AgentInstructionsBundle>(
       agentPath(id, companyId, `/instructions-bundle/file?path=${encodeURIComponent(relativePath)}`),
+    ),
+  scriptBundle: (id: string, companyId?: string) =>
+    api.get<AgentScriptBundle>(agentPath(id, companyId, "/script-bundle")),
+  updateScriptBundle: (id: string, data: { entryFile?: string }, companyId?: string) =>
+    api.patch<AgentScriptBundle>(agentPath(id, companyId, "/script-bundle"), data),
+  scriptFile: (id: string, relativePath: string, companyId?: string) =>
+    api.get<AgentScriptFileDetail>(
+      agentPath(id, companyId, `/script-bundle/file?path=${encodeURIComponent(relativePath)}`),
+    ),
+  saveScriptFile: (
+    id: string,
+    data: { path: string; content: string },
+    companyId?: string,
+  ) => api.put<AgentScriptFileDetail>(agentPath(id, companyId, "/script-bundle/file"), data),
+  deleteScriptFile: (id: string, relativePath: string, companyId?: string) =>
+    api.delete<AgentScriptBundle>(
+      agentPath(id, companyId, `/script-bundle/file?path=${encodeURIComponent(relativePath)}`),
     ),
   pause: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/pause"), {}),
   resume: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/resume"), {}),

@@ -308,6 +308,7 @@ const adapterFixtures: AdapterInfo[] = [
       supportsLocalAgentJwt: true,
       requiresMaterializedRuntimeSkills: true,
       supportsModelProfiles: true,
+      supportsScriptBundle: false,
     },
   },
   {
@@ -323,6 +324,7 @@ const adapterFixtures: AdapterInfo[] = [
       supportsLocalAgentJwt: true,
       requiresMaterializedRuntimeSkills: true,
       supportsModelProfiles: true,
+      supportsScriptBundle: false,
     },
   },
   {
@@ -338,6 +340,7 @@ const adapterFixtures: AdapterInfo[] = [
       supportsLocalAgentJwt: false,
       requiresMaterializedRuntimeSkills: false,
       supportsModelProfiles: false,
+      supportsScriptBundle: true,
     },
   },
 ];
