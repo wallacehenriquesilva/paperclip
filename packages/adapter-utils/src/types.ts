@@ -419,6 +419,14 @@ export interface ServerAdapterModule {
   instructionsPathKey?: string;
 
   /**
+   * Adapter supports a managed script bundle (executables stored alongside the
+   * agent and edited via the UI). When true, the server exposes the scripts
+   * routes and the UI renders the Scripts tab. Intended for adapters like
+   * process/http that need user-authored executables rather than LLM context.
+   */
+  supportsScriptBundle?: boolean;
+
+  /**
    * Adapter needs runtime skill entries materialized (written to disk)
    * before being passed via config. Used by adapters that scan a directory
    * rather than reading config.paperclipRuntimeSkills.
