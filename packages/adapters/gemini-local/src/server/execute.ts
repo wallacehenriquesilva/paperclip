@@ -280,6 +280,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
+  // The CLI reads GEMINI_SANDBOX from the env (and settings.json) and treats
+  // its mere presence as "sandbox on" — even GEMINI_SANDBOX=false is parsed
+  // as truthy. The only way to disable it via env is to NOT set the variable.
+  // Make the adapter-config `sandbox` authoritative, applied after the merge
+  // so neither process.env nor stray env bindings can re-enable it.
+  if (sandbox) {
+    effectiveEnv.GEMINI_SANDBOX = "true";
+  } else {
+    delete effectiveEnv.GEMINI_SANDBOX;
+  }
   const billingType = resolveGeminiBillingType(effectiveEnv);
   const runtimeEnv = Object.fromEntries(
     Object.entries(ensurePathInEnv(effectiveEnv)).filter(
