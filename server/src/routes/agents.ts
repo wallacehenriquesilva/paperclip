@@ -2203,6 +2203,14 @@ export function agentRoutes(
         agentEnv,
       );
     }
+    const agentHeaders = asRecord(agent.adapterConfig)?.headers;
+    if (agentHeaders) {
+      await secretsSvc.syncEnvBindingsForTarget?.(
+        companyId,
+        { targetType: "agent", targetId: agent.id, pathPrefix: "headers" },
+        agentHeaders,
+      );
+    }
 
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -2685,6 +2693,12 @@ export function agentRoutes(
         agent.companyId,
         { targetType: "agent", targetId: agent.id },
         agentEnv,
+      );
+      const agentHeaders = asRecord(agent.adapterConfig)?.headers;
+      await secretsSvc.syncEnvBindingsForTarget?.(
+        agent.companyId,
+        { targetType: "agent", targetId: agent.id, pathPrefix: "headers" },
+        agentHeaders,
       );
     }
 

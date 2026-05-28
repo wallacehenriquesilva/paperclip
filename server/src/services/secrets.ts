@@ -54,6 +54,8 @@ import type {
 import { isSecretProviderClientError } from "../secrets/types.js";
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// RFC 7230 token chars — valid HTTP header field names.
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 const SENSITIVE_ENV_KEY_RE =
   /(api[-_]?key|access[-_]?token|auth(?:_?token)?|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)/i;
 const REDACTED_SENTINEL = "***REDACTED***";
@@ -257,6 +259,10 @@ export function secretService(db: Db) {
   type NormalizeEnvOptions = {
     strictMode?: boolean;
     fieldPath?: string;
+    /** Key validation regex (defaults to env-var naming rules). */
+    keyRe?: RegExp;
+    /** Human label for the key in error messages. */
+    keyLabel?: string;
   };
 
   async function getById(id: string) {
@@ -586,10 +592,12 @@ export function secretService(db: Db) {
     const record = asRecord(envValue);
     if (!record) throw unprocessable(`${opts?.fieldPath ?? "env"} must be an object`);
 
+    const keyRe = opts?.keyRe ?? ENV_KEY_RE;
+    const keyLabel = opts?.keyLabel ?? "environment variable name";
     const normalized: AgentEnvConfig = {};
     for (const [key, rawBinding] of Object.entries(record)) {
-      if (!ENV_KEY_RE.test(key)) {
-        throw unprocessable(`Invalid environment variable name: ${key}`);
+      if (!keyRe.test(key)) {
+        throw unprocessable(`Invalid ${keyLabel}: ${key}`);
       }
 
       const parsed = envBindingSchema.safeParse(rawBinding);
@@ -627,10 +635,17 @@ export function secretService(db: Db) {
     opts?: { strictMode?: boolean },
   ) {
     const normalized = { ...adapterConfig };
-    if (!Object.prototype.hasOwnProperty.call(adapterConfig, "env")) {
-      return normalized;
+    if (Object.prototype.hasOwnProperty.call(adapterConfig, "env")) {
+      normalized.env = await normalizeEnvConfig(companyId, adapterConfig.env, opts);
     }
-    normalized.env = await normalizeEnvConfig(companyId, adapterConfig.env, opts);
+    if (Object.prototype.hasOwnProperty.call(adapterConfig, "headers")) {
+      normalized.headers = await normalizeEnvConfig(companyId, adapterConfig.headers, {
+        ...opts,
+        fieldPath: "headers",
+        keyRe: HEADER_NAME_RE,
+        keyLabel: "HTTP header name",
+      });
+    }
     return normalized;
   }
 
@@ -2155,39 +2170,50 @@ export function secretService(db: Db) {
       const resolved = { ...adapterConfig };
       const secretKeys = new Set<string>();
       const manifest: RuntimeSecretManifestEntry[] = [];
-      if (!Object.prototype.hasOwnProperty.call(adapterConfig, "env")) {
-        return { config: resolved, secretKeys, manifest };
-      }
-      const record = asRecord(adapterConfig.env);
-      if (!record) {
-        resolved.env = {};
-        return { config: resolved, secretKeys, manifest };
-      }
-      const env: Record<string, string> = {};
-      for (const [key, rawBinding] of Object.entries(record)) {
-        if (!ENV_KEY_RE.test(key)) {
-          throw unprocessable(`Invalid environment variable name: ${key}`);
+
+      // Resolves a map of `EnvBinding`s (plain or secret-backed) into plain
+      // string values, used for both `env` vars and HTTP `headers`.
+      const resolveBindingMap = async (
+        field: string,
+        keyRe: RegExp,
+        keyLabel: string,
+      ): Promise<void> => {
+        if (!Object.prototype.hasOwnProperty.call(adapterConfig, field)) return;
+        const record = asRecord(adapterConfig[field]);
+        if (!record) {
+          resolved[field] = {};
+          return;
         }
-        const parsed = envBindingSchema.safeParse(rawBinding);
-        if (!parsed.success) {
-          throw unprocessable(`Invalid environment binding for key: ${key}`);
+        const out: Record<string, string> = {};
+        for (const [key, rawBinding] of Object.entries(record)) {
+          if (!keyRe.test(key)) {
+            throw unprocessable(`Invalid ${keyLabel}: ${key}`);
+          }
+          const parsed = envBindingSchema.safeParse(rawBinding);
+          if (!parsed.success) {
+            throw unprocessable(`Invalid binding for ${keyLabel}: ${key}`);
+          }
+          const binding = canonicalizeBinding(parsed.data as EnvBinding);
+          if (binding.type === "plain") {
+            out[key] = binding.value;
+          } else {
+            const secretResolution = await resolveSecretValueInternal(
+              companyId,
+              binding.secretId,
+              binding.version,
+              context ? { ...context, configPath: `${field}.${key}` } : undefined,
+            );
+            out[key] = secretResolution.value;
+            manifest.push(secretResolution.manifestEntry);
+            secretKeys.add(key);
+          }
         }
-        const binding = canonicalizeBinding(parsed.data as EnvBinding);
-        if (binding.type === "plain") {
-          env[key] = binding.value;
-        } else {
-          const secretResolution = await resolveSecretValueInternal(
-            companyId,
-            binding.secretId,
-            binding.version,
-            context ? { ...context, configPath: `env.${key}` } : undefined,
-          );
-          env[key] = secretResolution.value;
-          manifest.push(secretResolution.manifestEntry);
-          secretKeys.add(key);
-        }
-      }
-      resolved.env = env;
+        resolved[field] = out;
+      };
+
+      await resolveBindingMap("env", ENV_KEY_RE, "environment variable name");
+      await resolveBindingMap("headers", HEADER_NAME_RE, "HTTP header name");
+
       return { config: resolved, secretKeys, manifest };
     },
   };

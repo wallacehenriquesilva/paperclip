@@ -119,13 +119,11 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     label: "Process",
     description: "Internal process adapter",
     icon: Cpu,
-    comingSoon: true,
   },
   http: {
     label: "HTTP",
     description: "Internal HTTP adapter",
     icon: Cpu,
-    comingSoon: true,
   },
 };
 
