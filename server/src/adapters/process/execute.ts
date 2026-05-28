@@ -11,10 +11,11 @@ import {
   resolveCommandForLogs,
   runChildProcess,
 } from "../utils.js";
+import { applyPaperclipWorkspaceEnv } from "@paperclipai/adapter-utils/server-utils";
 import { agentScriptsService } from "../../services/agent-scripts.js";
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const { runId, agent, config, onLog, onMeta } = ctx;
+  const { runId, agent, config, context, onLog, onMeta, authToken } = ctx;
 
   // If the operator didn't supply an explicit command, fall back to the
   // managed script bundle entry script. The materialize call ensures the
@@ -30,12 +31,70 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   if (!command) throw new Error("Process adapter missing command");
 
-  const cwd = asString(config.cwd, scriptsRoot ?? process.cwd());
   const envConfig = parseObject(config.env);
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   for (const [k, v] of Object.entries(envConfig)) {
     if (typeof v === "string") env[k] = v;
   }
+
+  // Expose the wake / run context to the child process so scripts can call
+  // the Paperclip API and act on the assigned task. Mirrors what the local
+  // CLI adapters (gemini/codex/claude/...) do, but without their CLI-specific
+  // prompt rendering.
+  env.PAPERCLIP_RUN_ID = runId;
+  if (authToken && typeof env.PAPERCLIP_API_KEY !== "string") {
+    env.PAPERCLIP_API_KEY = authToken;
+  }
+  const wakeTaskId =
+    (typeof context.taskId === "string" && context.taskId.trim().length > 0 && context.taskId.trim()) ||
+    (typeof context.issueId === "string" && context.issueId.trim().length > 0 && context.issueId.trim()) ||
+    null;
+  if (wakeTaskId) env.PAPERCLIP_TASK_ID = wakeTaskId;
+  const wakeReason =
+    typeof context.wakeReason === "string" && context.wakeReason.trim().length > 0
+      ? context.wakeReason.trim()
+      : null;
+  if (wakeReason) env.PAPERCLIP_WAKE_REASON = wakeReason;
+  const wakeCommentId =
+    (typeof context.wakeCommentId === "string" && context.wakeCommentId.trim().length > 0 && context.wakeCommentId.trim()) ||
+    (typeof context.commentId === "string" && context.commentId.trim().length > 0 && context.commentId.trim()) ||
+    null;
+  if (wakeCommentId) env.PAPERCLIP_WAKE_COMMENT_ID = wakeCommentId;
+  const issueWorkMode =
+    typeof context.issueWorkMode === "string" && context.issueWorkMode.trim().length > 0
+      ? context.issueWorkMode.trim()
+      : null;
+  if (issueWorkMode) env.PAPERCLIP_ISSUE_WORK_MODE = issueWorkMode;
+  try {
+    const wakePayload = (context as Record<string, unknown>).paperclipWake;
+    if (wakePayload !== undefined && wakePayload !== null) {
+      env.PAPERCLIP_WAKE_PAYLOAD_JSON = JSON.stringify(wakePayload);
+    }
+  } catch {
+    // Non-fatal: drop the payload var if serialization fails (cycles, etc.).
+  }
+
+  // Workspace env (cwd, repo URL, branch, etc.) — pulled from the wake
+  // context the orchestrator already prepared.
+  const workspaceContext = parseObject(context.paperclipWorkspace);
+  applyPaperclipWorkspaceEnv(env, {
+    workspaceCwd: asString(workspaceContext.cwd, ""),
+    workspaceSource: asString(workspaceContext.source, ""),
+    workspaceStrategy: asString(workspaceContext.strategy, ""),
+    workspaceId: asString(workspaceContext.workspaceId, ""),
+    workspaceRepoUrl: asString(workspaceContext.repoUrl, ""),
+    workspaceRepoRef: asString(workspaceContext.repoRef, ""),
+    workspaceBranch: asString(workspaceContext.branch, ""),
+    workspaceWorktreePath: asString(workspaceContext.worktreePath, ""),
+  });
+
+  // Default cwd: the explicit config.cwd, or the workspace cwd, or the
+  // scripts root when running the bundle entry.
+  const cwd = asString(
+    config.cwd,
+    asString(workspaceContext.cwd, "") || scriptsRoot || process.cwd(),
+  );
+
   if (scriptsRoot && typeof env.PAPERCLIP_SCRIPTS_ROOT !== "string") {
     env.PAPERCLIP_SCRIPTS_ROOT = scriptsRoot;
   } else if (!scriptsRoot && typeof env.PAPERCLIP_SCRIPTS_ROOT !== "string") {
