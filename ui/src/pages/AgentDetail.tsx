@@ -773,19 +773,21 @@ export function AgentDetail() {
     const canonicalTab =
       activeView === "instructions"
         ? "instructions"
-        : activeView === "configuration"
-          ? "configuration"
-          : activeView === "skills"
-            ? "skills"
-            : activeView === "mcp"
-              ? "mcp"
-              : activeView === "integrations"
-                ? "integrations"
-                : activeView === "runs"
-                  ? "runs"
-                  : activeView === "budget"
-                    ? "budget"
-                    : "dashboard";
+        : activeView === "scripts"
+          ? "scripts"
+          : activeView === "configuration"
+            ? "configuration"
+            : activeView === "skills"
+              ? "skills"
+              : activeView === "mcp"
+                ? "mcp"
+                : activeView === "integrations"
+                  ? "integrations"
+                  : activeView === "runs"
+                    ? "runs"
+                    : activeView === "budget"
+                      ? "budget"
+                      : "dashboard";
     if (routeAgentRef !== canonicalAgentRef || urlTab !== canonicalTab) {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
       return;
