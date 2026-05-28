@@ -3395,7 +3395,10 @@ export function agentRoutes(
     if (existing) {
       assertCompanyAccess(req, existing.companyId);
     }
-    const run = await heartbeat.cancelRun(runId);
+    // Operator-driven cancel means "stop the work on this issue", not just
+    // "kill this one process". Without cancelIssue:true the linked issue
+    // stays in_progress and the issue monitor immediately re-wakes the agent.
+    const run = await heartbeat.cancelRun(runId, { cancelIssue: true });
 
     if (run) {
       await logActivity(db, {
