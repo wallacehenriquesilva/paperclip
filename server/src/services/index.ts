@@ -6,6 +6,7 @@ export { companyMcpServerService } from "./company-mcp-servers.js";
 export { agentService, deduplicateAgentName } from "./agents.js";
 export { agentGithubIdentityService } from "./agent-github-identity.js";
 export { agentInstructionsService, syncInstructionsBundleConfigFromFilePath } from "./agent-instructions.js";
+export { agentScriptsService, resolveManagedScriptsRoot } from "./agent-scripts.js";
 export { assetService } from "./assets.js";
 export { documentService, extractLegacyPlanBody } from "./documents.js";
 export {

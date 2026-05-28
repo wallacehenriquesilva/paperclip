@@ -240,6 +240,7 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
 type AgentDetailView =
   | "dashboard"
   | "instructions"
+  | "scripts"
   | "configuration"
   | "skills"
   | "mcp"
@@ -249,6 +250,7 @@ type AgentDetailView =
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "instructions" || value === "prompts") return "instructions";
+  if (value === "scripts") return "scripts";
   if (value === "configure" || value === "configuration") return "configuration";
   if (value === "skills") return "skills";
   if (value === "mcp" || value === "mcp-servers") return "mcp";
@@ -681,6 +683,12 @@ export function AgentDetail() {
   const canonicalAgentRef = agent ? agentRouteRef(agent) : routeAgentRef;
   const agentLookupRef = agent?.id ?? routeAgentRef;
   const resolvedAgentId = agent?.id ?? null;
+  const getAdapterCapabilities = useAdapterCapabilities();
+  const agentCapabilities = agent
+    ? getAdapterCapabilities(agent.adapterType)
+    : null;
+  const showInstructionsTab = agentCapabilities?.supportsInstructionsBundle ?? true;
+  const showScriptsTab = agentCapabilities?.supportsScriptBundle ?? false;
 
   const { data: runtimeState } = useQuery({
     queryKey: queryKeys.agents.runtimeState(resolvedAgentId ?? routeAgentRef),
@@ -765,19 +773,21 @@ export function AgentDetail() {
     const canonicalTab =
       activeView === "instructions"
         ? "instructions"
-        : activeView === "configuration"
-          ? "configuration"
-          : activeView === "skills"
-            ? "skills"
-            : activeView === "mcp"
-              ? "mcp"
-              : activeView === "integrations"
-                ? "integrations"
-                : activeView === "runs"
-                  ? "runs"
-                  : activeView === "budget"
-                    ? "budget"
-                    : "dashboard";
+        : activeView === "scripts"
+          ? "scripts"
+          : activeView === "configuration"
+            ? "configuration"
+            : activeView === "skills"
+              ? "skills"
+              : activeView === "mcp"
+                ? "mcp"
+                : activeView === "integrations"
+                  ? "integrations"
+                  : activeView === "runs"
+                    ? "runs"
+                    : activeView === "budget"
+                      ? "budget"
+                      : "dashboard";
     if (routeAgentRef !== canonicalAgentRef || urlTab !== canonicalTab) {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
       return;
@@ -893,6 +903,8 @@ export function AgentDetail() {
         crumbs.push({ label: `Run ${urlRunId.slice(0, 8)}` });
       } else if (activeView === "instructions") {
         crumbs.push({ label: "Instructions" });
+      } else if (activeView === "scripts") {
+        crumbs.push({ label: "Scripts" });
       } else if (activeView === "configuration") {
         crumbs.push({ label: "Configuration" });
       // } else if (activeView === "skills") { // TODO: bring back later
@@ -930,7 +942,7 @@ export function AgentDetail() {
     return <Navigate to={`/agents/${canonicalAgentRef}/dashboard`} replace />;
   }
   const isPendingApproval = agent.status === "pending_approval";
-  const showConfigActionBar = (activeView === "configuration" || activeView === "instructions") && (configDirty || configSaving);
+  const showConfigActionBar = (activeView === "configuration" || activeView === "instructions" || activeView === "scripts") && (configDirty || configSaving);
 
   return (
     <div className={cn("space-y-6", isMobile && showConfigActionBar && "pb-24")}>
@@ -1038,7 +1050,8 @@ export function AgentDetail() {
           <PageTabBar
             items={[
               { value: "dashboard", label: "Dashboard" },
-              { value: "instructions", label: "Instructions" },
+              ...(showInstructionsTab ? [{ value: "instructions", label: "Instructions" }] : []),
+              ...(showScriptsTab ? [{ value: "scripts", label: "Scripts" }] : []),
               { value: "skills", label: "Skills" },
               { value: "mcp", label: "MCP" },
               { value: "configuration", label: "Configuration" },
@@ -1131,6 +1144,17 @@ export function AgentDetail() {
 
       {activeView === "instructions" && (
         <PromptsTab
+          agent={agent}
+          companyId={resolvedCompanyId ?? undefined}
+          onDirtyChange={setConfigDirty}
+          onSaveActionChange={setSaveConfigAction}
+          onCancelActionChange={setCancelConfigAction}
+          onSavingChange={setConfigSaving}
+        />
+      )}
+
+      {activeView === "scripts" && showScriptsTab && (
+        <ScriptsTab
           agent={agent}
           companyId={resolvedCompanyId ?? undefined}
           onDirtyChange={setConfigDirty}
@@ -4267,6 +4291,305 @@ function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ScriptsTab — managed script bundle editor for process/http adapters.
+// Smaller surface than PromptsTab: managed-only, no markdown editor (scripts
+// are code), no legacy migration shims.
+// ---------------------------------------------------------------------------
+
+function ScriptsTab({
+  agent,
+  companyId,
+  onDirtyChange,
+  onSaveActionChange,
+  onCancelActionChange,
+  onSavingChange,
+}: {
+  agent: Agent;
+  companyId?: string;
+  onDirtyChange: (dirty: boolean) => void;
+  onSaveActionChange: (save: (() => void) | null) => void;
+  onCancelActionChange: (cancel: (() => void) | null) => void;
+  onSavingChange: (saving: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [selectedFile, setSelectedFile] = useState<string>("run.sh");
+  const [draft, setDraft] = useState<string | null>(null);
+  const [newFilePath, setNewFilePath] = useState("");
+  const [showNewFileInput, setShowNewFileInput] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<string[]>([]);
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [awaitingRefresh, setAwaitingRefresh] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const lastFileVersionRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setSelectedFile("run.sh");
+    setDraft(null);
+    setNewFilePath("");
+    setShowNewFileInput(false);
+    setPendingFiles([]);
+    setExpandedDirs(new Set());
+    setAwaitingRefresh(false);
+    setError(null);
+    lastFileVersionRef.current = null;
+  }, [agent.id]);
+
+  const { data: bundle, isLoading: bundleLoading } = useQuery({
+    queryKey: queryKeys.agents.scriptBundle(agent.id),
+    queryFn: () => agentsApi.scriptBundle(agent.id, companyId),
+    enabled: Boolean(companyId),
+  });
+
+  const entryFile = bundle?.entryFile ?? "run.sh";
+  const fileOptions = useMemo(() => bundle?.files.map((file) => file.path) ?? [], [bundle]);
+  const visibleFilePaths = useMemo(
+    () => [...new Set([entryFile, ...fileOptions, ...pendingFiles])],
+    [entryFile, fileOptions, pendingFiles],
+  );
+  const fileTree = useMemo(
+    () => buildFileTree(Object.fromEntries(visibleFilePaths.map((p) => [p, ""]))),
+    [visibleFilePaths],
+  );
+  const selectedOrEntryFile = selectedFile || entryFile;
+  const selectedFileExists = fileOptions.includes(selectedOrEntryFile);
+
+  const { data: selectedFileDetail, isLoading: fileLoading } = useQuery({
+    queryKey: queryKeys.agents.scriptFile(agent.id, selectedOrEntryFile),
+    queryFn: () => agentsApi.scriptFile(agent.id, selectedOrEntryFile, companyId),
+    enabled: Boolean(companyId && selectedFileExists),
+  });
+
+  const saveFile = useMutation({
+    mutationFn: (data: { path: string; content: string }) =>
+      agentsApi.saveScriptFile(agent.id, data, companyId),
+    onMutate: () => setAwaitingRefresh(true),
+    onSuccess: (_, variables) => {
+      setPendingFiles((prev) => prev.filter((f) => f !== variables.path));
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.scriptBundle(agent.id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.scriptFile(agent.id, variables.path) });
+      setError(null);
+    },
+    onError: (err) => {
+      setAwaitingRefresh(false);
+      setError(err instanceof Error ? err.message : "Failed to save script");
+    },
+  });
+
+  const deleteFile = useMutation({
+    mutationFn: (relativePath: string) => agentsApi.deleteScriptFile(agent.id, relativePath, companyId),
+    onSuccess: (_, relativePath) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.scriptBundle(agent.id) });
+      queryClient.removeQueries({ queryKey: queryKeys.agents.scriptFile(agent.id, relativePath) });
+      setError(null);
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Failed to delete script");
+    },
+  });
+
+  useEffect(() => {
+    const nextExpanded = new Set<string>();
+    for (const filePath of visibleFilePaths) {
+      const parts = filePath.split("/");
+      let currentPath = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i]!;
+        nextExpanded.add(currentPath);
+      }
+    }
+    setExpandedDirs((current) => (setsEqual(current, nextExpanded) ? current : nextExpanded));
+  }, [visibleFilePaths]);
+
+  useEffect(() => {
+    const versionKey = selectedFileExists && selectedFileDetail
+      ? `${selectedFileDetail.path}:${selectedFileDetail.content}`
+      : `pending:${selectedOrEntryFile}`;
+    if (awaitingRefresh) {
+      setAwaitingRefresh(false);
+      setDraft(null);
+      lastFileVersionRef.current = versionKey;
+      return;
+    }
+    if (lastFileVersionRef.current !== versionKey) {
+      setDraft(null);
+      lastFileVersionRef.current = versionKey;
+    }
+  }, [awaitingRefresh, selectedFileDetail, selectedFileExists, selectedOrEntryFile]);
+
+  const currentContent = selectedFileExists ? (selectedFileDetail?.content ?? "") : "";
+  const displayValue = draft ?? currentContent;
+  const isDirty = draft !== null && draft !== currentContent;
+  const isSaving = saveFile.isPending || deleteFile.isPending || awaitingRefresh;
+
+  const handleSave = useCallback(() => {
+    if (draft === null) return;
+    saveFile.mutate({ path: selectedOrEntryFile, content: draft });
+  }, [draft, saveFile, selectedOrEntryFile]);
+
+  const handleCancel = useCallback(() => {
+    setDraft(null);
+  }, []);
+
+  useEffect(() => {
+    onDirtyChange(isDirty);
+  }, [isDirty, onDirtyChange]);
+
+  useEffect(() => {
+    onSavingChange(isSaving);
+  }, [isSaving, onSavingChange]);
+
+  useEffect(() => {
+    onSaveActionChange(isDirty ? handleSave : null);
+    onCancelActionChange(isDirty ? handleCancel : null);
+    return () => {
+      onSaveActionChange(null);
+      onCancelActionChange(null);
+    };
+  }, [handleCancel, handleSave, isDirty, onCancelActionChange, onSaveActionChange]);
+
+  function handleCreateFile() {
+    const trimmed = newFilePath.trim();
+    if (!trimmed) return;
+    if (visibleFilePaths.includes(trimmed)) {
+      setError(`A script named "${trimmed}" already exists`);
+      return;
+    }
+    setPendingFiles((prev) => [...prev, trimmed]);
+    setSelectedFile(trimmed);
+    setDraft("#!/usr/bin/env bash\nset -euo pipefail\n\n");
+    setNewFilePath("");
+    setShowNewFileInput(false);
+    setError(null);
+  }
+
+  function handleDeleteFile(relativePath: string) {
+    if (relativePath === entryFile) {
+      setError("Cannot delete the entry script");
+      return;
+    }
+    if (!window.confirm(`Delete script "${relativePath}"?`)) return;
+    deleteFile.mutate(relativePath);
+    if (selectedOrEntryFile === relativePath) setSelectedFile(entryFile);
+  }
+
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row">
+      <div className="w-full sm:w-64 shrink-0 space-y-2">
+        <div className="flex items-center justify-between">
+          <h4 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Scripts
+          </h4>
+          <button
+            type="button"
+            onClick={() => setShowNewFileInput((value) => !value)}
+            className="text-xs text-muted-foreground hover:text-foreground"
+            disabled={isSaving}
+          >
+            + New
+          </button>
+        </div>
+        {showNewFileInput && (
+          <div className="flex gap-1">
+            <input
+              autoFocus
+              value={newFilePath}
+              onChange={(event) => setNewFilePath(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") handleCreateFile();
+                if (event.key === "Escape") {
+                  setShowNewFileInput(false);
+                  setNewFilePath("");
+                }
+              }}
+              placeholder="path/to/script.sh"
+              className="flex-1 rounded-md border border-border px-2 py-1 text-xs font-mono bg-transparent outline-none"
+            />
+            <button
+              type="button"
+              onClick={handleCreateFile}
+              className="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
+            >
+              Add
+            </button>
+          </div>
+        )}
+        <FileTree
+          nodes={fileTree}
+          selectedFile={selectedOrEntryFile}
+          expandedDirs={expandedDirs}
+          onToggleDir={(p) =>
+            setExpandedDirs((current) => {
+              const next = new Set(current);
+              if (next.has(p)) next.delete(p);
+              else next.add(p);
+              return next;
+            })
+          }
+          onSelectFile={(p) => setSelectedFile(p)}
+          onToggleCheck={() => {}}
+          showCheckboxes={false}
+          loading={bundleLoading}
+          empty={{
+            title: "No scripts yet",
+            description: "The entry script (run.sh) will be seeded automatically.",
+          }}
+        />
+      </div>
+
+      <div className="flex-1 min-w-0 space-y-2">
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {error}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
+              {selectedOrEntryFile}
+            </code>
+            {selectedFileDetail?.executable && (
+              <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600 dark:text-emerald-400">
+                executable
+              </span>
+            )}
+            {selectedOrEntryFile === entryFile && (
+              <span className="rounded bg-primary/10 px-1.5 py-0.5 text-primary">entry</span>
+            )}
+          </div>
+          {selectedFileExists && selectedOrEntryFile !== entryFile && (
+            <button
+              type="button"
+              onClick={() => handleDeleteFile(selectedOrEntryFile)}
+              className="text-xs text-muted-foreground hover:text-destructive"
+              disabled={isSaving}
+            >
+              Delete
+            </button>
+          )}
+        </div>
+        <textarea
+          value={displayValue}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder={
+            !selectedFileExists && !pendingFiles.includes(selectedOrEntryFile)
+              ? "Loading…"
+              : "#!/usr/bin/env bash\n…"
+          }
+          spellCheck={false}
+          disabled={fileLoading && !pendingFiles.includes(selectedOrEntryFile)}
+          className="min-h-[400px] w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm font-mono outline-none focus:border-foreground/40"
+        />
+        <p className="text-[11px] text-muted-foreground/70">
+          Scripts run from <code>{bundle?.rootPath ?? "the agent script bundle"}</code>. Files
+          starting with <code>#!</code> are chmod +x&apos;d on save. PAPERCLIP_* env vars are
+          injected automatically — see the seed <code>run.sh</code> for examples.
+        </p>
+      </div>
     </div>
   );
 }

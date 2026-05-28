@@ -67,6 +67,7 @@ interface AdapterCapabilities {
   supportsLocalAgentJwt: boolean;
   requiresMaterializedRuntimeSkills: boolean;
   supportsModelProfiles: boolean;
+  supportsScriptBundle: boolean;
 }
 
 interface AdapterInfo {
@@ -121,6 +122,7 @@ function buildAdapterCapabilities(adapter: ServerAdapterModule): AdapterCapabili
     supportsLocalAgentJwt: adapter.supportsLocalAgentJwt ?? false,
     requiresMaterializedRuntimeSkills: adapter.requiresMaterializedRuntimeSkills ?? false,
     supportsModelProfiles: Boolean(adapter.modelProfiles?.length || adapter.listModelProfiles),
+    supportsScriptBundle: adapter.supportsScriptBundle ?? false,
   };
 }
 

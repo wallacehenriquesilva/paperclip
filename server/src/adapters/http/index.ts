@@ -7,6 +7,7 @@ export const httpAdapter: ServerAdapterModule = {
   execute,
   testEnvironment,
   models: [],
+  supportsScriptBundle: true,
   agentConfigurationDoc: `# http agent configuration
 
 Adapter: http

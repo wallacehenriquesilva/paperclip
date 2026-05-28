@@ -31,6 +31,19 @@ export const upsertAgentInstructionsFileSchema = z.object({
 
 export type UpsertAgentInstructionsFile = z.infer<typeof upsertAgentInstructionsFileSchema>;
 
+export const updateAgentScriptBundleSchema = z.object({
+  entryFile: z.string().trim().min(1).optional(),
+});
+
+export type UpdateAgentScriptBundle = z.infer<typeof updateAgentScriptBundleSchema>;
+
+export const upsertAgentScriptFileSchema = z.object({
+  path: z.string().trim().min(1),
+  content: z.string(),
+});
+
+export type UpsertAgentScriptFile = z.infer<typeof upsertAgentScriptFileSchema>;
+
 const adapterConfigSchema = z.record(z.unknown()).superRefine((value, ctx) => {
   const envValue = value.env;
   if (envValue === undefined) return;

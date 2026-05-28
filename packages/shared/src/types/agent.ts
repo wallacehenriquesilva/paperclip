@@ -56,6 +56,27 @@ export interface AgentInstructionsBundle {
   files: AgentInstructionsFileSummary[];
 }
 
+export interface AgentScriptFileSummary {
+  path: string;
+  size: number;
+  language: string;
+  executable: boolean;
+  isEntryFile: boolean;
+}
+
+export interface AgentScriptFileDetail extends AgentScriptFileSummary {
+  content: string;
+}
+
+export interface AgentScriptBundle {
+  agentId: string;
+  companyId: string;
+  rootPath: string;
+  entryFile: string;
+  entryFilePath: string;
+  files: AgentScriptFileSummary[];
+}
+
 export interface AgentAccessState {
   canAssignTasks: boolean;
   taskAssignSource: "explicit_grant" | "agent_creator" | "ceo_role" | "none";

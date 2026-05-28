@@ -9420,11 +9420,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return wakeupIds.length;
   }
 
-  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane") {
+  async function cancelRunInternal(
+    runId: string,
+    reason = "Cancelled by control plane",
+    opts: { cancelIssue?: boolean } = {},
+  ) {
     const run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
     if (!CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(run.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number])) return run;
     const agent = await getAgent(run.agentId);
+
+    // Resolve the linked issue BEFORE releaseIssueExecutionAndPromote clears
+    // the execution lock — afterwards we can no longer recover the link via
+    // executionRunId. Try every contextSnapshot variant the orchestrator
+    // populates (issueId, taskId, paperclipIssue.id) and fall back to a
+    // direct lookup by executionRunId.
+    let preCancelIssueId: string | null = null;
+    if (opts.cancelIssue) {
+      const ctx = parseObject(run.contextSnapshot);
+      preCancelIssueId =
+        readNonEmptyString(ctx.issueId) ??
+        readNonEmptyString(ctx.taskId) ??
+        readNonEmptyString(parseObject(ctx.paperclipIssue).id) ??
+        null;
+      if (!preCancelIssueId) {
+        const lockedIssue = await db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(and(eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)))
+          .then((rows) => rows[0] ?? null);
+        preCancelIssueId = lockedIssue?.id ?? null;
+      }
+    }
 
     const running = runningProcesses.get(run.id);
     if (running) {
@@ -9466,6 +9493,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         message: "run cancelled",
       });
       await releaseIssueExecutionAndPromote(cancelled);
+    }
+
+    // Optionally transition the linked issue to a terminal state. Used by the
+    // user-driven "Cancel run" path so the issue monitor doesn't immediately
+    // re-wake the agent on an issue still flagged as in_progress.
+    if (opts.cancelIssue && cancelled && preCancelIssueId) {
+      try {
+        const existingIssue = await issuesSvc.getById(preCancelIssueId);
+        // Skip already-terminal issues so an explicit cancel never overwrites
+        // done/cancelled work, and so cancelling a child run doesn't fight a
+        // tree-control cancel that already finalised the subtree.
+        if (existingIssue && existingIssue.status !== "done" && existingIssue.status !== "cancelled") {
+          await issuesSvc.update(preCancelIssueId, {
+            status: "cancelled",
+            cancelledAt: new Date(),
+          });
+          await logActivity(db, {
+            companyId: cancelled.companyId,
+            actorType: "system",
+            actorId: "heartbeat",
+            action: "issue.cancelled_by_run_cancel",
+            entityType: "issue",
+            entityId: preCancelIssueId,
+            details: { runId: cancelled.id, reason },
+          });
+        } else if (!existingIssue) {
+          logger.warn(
+            { runId: cancelled.id, issueId: preCancelIssueId },
+            "linked issue not found while transitioning to cancelled after run cancel",
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          { err, runId: cancelled.id, issueId: preCancelIssueId },
+          "failed to transition linked issue to cancelled after run cancel",
+        );
+      }
+    } else if (opts.cancelIssue && cancelled && !preCancelIssueId) {
+      logger.warn(
+        { runId: cancelled.id },
+        "cancelIssue requested but no linked issue could be resolved from run context",
+      );
     }
 
     runningProcesses.delete(run.id);
@@ -9856,7 +9925,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     },
 
-    cancelRun: (runId: string) => cancelRunInternal(runId),
+    cancelRun: (runId: string, opts?: { cancelIssue?: boolean }) =>
+      cancelRunInternal(runId, "Cancelled by control plane", opts ?? {}),
 
     cancelActiveForAgent: (agentId: string) => cancelActiveForAgentInternal(agentId),
 

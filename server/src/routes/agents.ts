@@ -20,6 +20,8 @@ import {
   type InstanceSchedulerHeartbeatAgent,
   upsertAgentInstructionsFileSchema,
   updateAgentInstructionsBundleSchema,
+  updateAgentScriptBundleSchema,
+  upsertAgentScriptFileSchema,
   updateAgentPermissionsSchema,
   updateAgentInstructionsPathSchema,
   wakeAgentSchema,
@@ -36,6 +38,7 @@ import {
   agentService,
   agentGithubIdentityService,
   agentInstructionsService,
+  agentScriptsService,
   accessService,
   approvalService,
   companySkillService,
@@ -177,6 +180,7 @@ export function agentRoutes(
   const secretsSvc = secretService(db);
   const githubIdentity = agentGithubIdentityService(db);
   const instructions = agentInstructionsService();
+  const scripts = agentScriptsService();
   const companySkills = companySkillService(db);
   const workspaceOperations = workspaceOperationService(db);
   const instanceSettings = instanceSettingsService(db);
@@ -2557,6 +2561,170 @@ export function agentRoutes(
     res.json(result.bundle);
   });
 
+  // ---- Script bundle (process/http adapters) -------------------------------
+
+  router.get("/agents/:id/script-bundle", async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCanReadAgent(req, existing);
+    res.json(await scripts.getBundle(existing));
+  });
+
+  router.patch(
+    "/agents/:id/script-bundle",
+    validate(updateAgentScriptBundleSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const existing = await svc.getById(id);
+      if (!existing) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await assertCanUpdateAgent(req, existing);
+
+      const actor = getActorInfo(req);
+      const { bundle, adapterConfig } = await scripts.updateBundle(existing, req.body);
+      const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
+        existing.companyId,
+        adapterConfig,
+        { strictMode: strictSecretsMode },
+      );
+      await svc.update(
+        id,
+        { adapterConfig: normalizedAdapterConfig },
+        {
+          recordRevision: {
+            createdByAgentId: actor.agentId,
+            createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+            source: "script_bundle_patch",
+          },
+        },
+      );
+
+      await logActivity(db, {
+        companyId: existing.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "agent.script_bundle_updated",
+        entityType: "agent",
+        entityId: existing.id,
+        details: {
+          rootPath: bundle.rootPath,
+          entryFile: bundle.entryFile,
+        },
+      });
+
+      res.json(bundle);
+    },
+  );
+
+  router.get("/agents/:id/script-bundle/file", async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCanReadAgent(req, existing);
+
+    const relativePath = typeof req.query.path === "string" ? req.query.path : "";
+    if (!relativePath.trim()) {
+      res.status(422).json({ error: "Query parameter 'path' is required" });
+      return;
+    }
+
+    res.json(await scripts.readFile(existing, relativePath));
+  });
+
+  router.put(
+    "/agents/:id/script-bundle/file",
+    validate(upsertAgentScriptFileSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const existing = await svc.getById(id);
+      if (!existing) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await assertCanUpdateAgent(req, existing);
+
+      const actor = getActorInfo(req);
+      const result = await scripts.writeFile(existing, req.body.path, req.body.content);
+      const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
+        existing.companyId,
+        result.adapterConfig,
+        { strictMode: strictSecretsMode },
+      );
+      await svc.update(
+        id,
+        { adapterConfig: normalizedAdapterConfig },
+        {
+          recordRevision: {
+            createdByAgentId: actor.agentId,
+            createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+            source: "script_bundle_file_put",
+          },
+        },
+      );
+
+      await logActivity(db, {
+        companyId: existing.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "agent.script_file_updated",
+        entityType: "agent",
+        entityId: existing.id,
+        details: {
+          path: result.file.path,
+          size: result.file.size,
+          executable: result.file.executable,
+        },
+      });
+
+      res.json(result.file);
+    },
+  );
+
+  router.delete("/agents/:id/script-bundle/file", async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCanUpdateAgent(req, existing);
+
+    const relativePath = typeof req.query.path === "string" ? req.query.path : "";
+    if (!relativePath.trim()) {
+      res.status(422).json({ error: "Query parameter 'path' is required" });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+    const result = await scripts.deleteFile(existing, relativePath);
+    await logActivity(db, {
+      companyId: existing.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "agent.script_file_deleted",
+      entityType: "agent",
+      entityId: existing.id,
+      details: { path: relativePath },
+    });
+
+    res.json(result.bundle);
+  });
+
   router.patch("/agents/:id", validate(updateAgentSchema), async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
@@ -3227,7 +3395,10 @@ export function agentRoutes(
     if (existing) {
       assertCompanyAccess(req, existing.companyId);
     }
-    const run = await heartbeat.cancelRun(runId);
+    // Operator-driven cancel means "stop the work on this issue", not just
+    // "kill this one process". Without cancelIssue:true the linked issue
+    // stays in_progress and the issue monitor immediately re-wakes the agent.
+    const run = await heartbeat.cancelRun(runId, { cancelIssue: true });
 
     if (run) {
       await logActivity(db, {

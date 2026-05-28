@@ -62,6 +62,7 @@ import type { StorageService } from "../storage/types.js";
 import { accessService } from "./access.js";
 import { agentService } from "./agents.js";
 import { agentInstructionsService } from "./agent-instructions.js";
+import { agentScriptsService } from "./agent-scripts.js";
 import { assetService } from "./assets.js";
 import { generateReadme } from "./company-export-readme.js";
 import { renderOrgChartPng, type OrgNode } from "../routes/org-chart-svg.js";
@@ -2918,6 +2919,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   const agents = agentService(db);
   const assetRecords = assetService(db);
   const instructions = agentInstructionsService();
+  const scripts = agentScriptsService();
   const access = accessService(db);
   const projects = projectService(db);
   const issues = issueService(db);
@@ -3497,6 +3499,13 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           } else {
             files[targetPath] = content;
           }
+        }
+
+        // Script bundle (process/http adapters) — namespaced under
+        // `agents/<slug>/scripts/` so it never collides with instructions.
+        const exportedScripts = await scripts.exportFiles(agent);
+        for (const [relativePath, content] of Object.entries(exportedScripts.files)) {
+          files[`agents/${slug}/scripts/${relativePath}`] = content;
         }
 
         const extension = stripEmptyValues({
@@ -4414,11 +4423,24 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         }
 
         const bundlePrefix = `agents/${manifestAgent.slug}/`;
+        const scriptsPrefix = `${bundlePrefix}scripts/`;
         const bundleFiles = Object.fromEntries(
           Object.entries(plan.source.files)
-            .filter(([filePath]) => filePath.startsWith(bundlePrefix))
+            // Scripts live under `agents/<slug>/scripts/`; keep them out of the
+            // instructions bundle so they don't get materialized into the wrong
+            // managed root.
+            .filter(([filePath]) =>
+              filePath.startsWith(bundlePrefix) && !filePath.startsWith(scriptsPrefix),
+            )
             .flatMap(([filePath, content]) => typeof content === "string"
               ? [[normalizePortablePath(filePath.slice(bundlePrefix.length)), content] as const]
+              : []),
+        );
+        const scriptFiles = Object.fromEntries(
+          Object.entries(plan.source.files)
+            .filter(([filePath]) => filePath.startsWith(scriptsPrefix))
+            .flatMap(([filePath, content]) => typeof content === "string"
+              ? [[normalizePortablePath(filePath.slice(scriptsPrefix.length)), content] as const]
               : []),
         );
         const markdownRaw = bundleFiles["AGENTS.md"] ?? readPortableTextFile(plan.source.files, manifestAgent.path);
@@ -4491,6 +4513,16 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           } catch (err) {
             warnings.push(`Failed to materialize instructions bundle for ${manifestAgent.slug}: ${err instanceof Error ? err.message : String(err)}`);
           }
+          if (Object.keys(scriptFiles).length > 0) {
+            try {
+              const materializedScripts = await scripts.materializeManagedBundle(updated, scriptFiles, {
+                replaceExisting: true,
+              });
+              updated = await agents.update(updated.id, { adapterConfig: materializedScripts.adapterConfig }) ?? updated;
+            } catch (err) {
+              warnings.push(`Failed to materialize script bundle for ${manifestAgent.slug}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
           agentStatusById.set(updated.id, updated.status ?? agentStatusById.get(updated.id) ?? null);
           importedSlugToAgentId.set(planAgent.slug, updated.id);
           existingSlugToAgentId.set(normalizeAgentUrlKey(updated.name) ?? updated.id, updated.id);
@@ -4526,6 +4558,16 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           created = await agents.update(created.id, { adapterConfig: materialized.adapterConfig }) ?? created;
         } catch (err) {
           warnings.push(`Failed to materialize instructions bundle for ${manifestAgent.slug}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (Object.keys(scriptFiles).length > 0) {
+          try {
+            const materializedScripts = await scripts.materializeManagedBundle(created, scriptFiles, {
+              replaceExisting: true,
+            });
+            created = await agents.update(created.id, { adapterConfig: materializedScripts.adapterConfig }) ?? created;
+          } catch (err) {
+            warnings.push(`Failed to materialize script bundle for ${manifestAgent.slug}: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
         agentStatusById.set(created.id, created.status ?? createdStatus);
         importedSlugToAgentId.set(planAgent.slug, created.id);

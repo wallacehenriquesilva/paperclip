@@ -10,6 +10,7 @@ export interface AdapterCapabilities {
   supportsLocalAgentJwt: boolean;
   requiresMaterializedRuntimeSkills: boolean;
   supportsModelProfiles: boolean;
+  supportsScriptBundle: boolean;
 }
 
 export interface AdapterInfo {
