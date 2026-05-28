@@ -266,7 +266,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     executionTargetIsRemote,
     executionCwd: effectiveExecutionCwd,
   });
-  if (executionTargetIsRemote && typeof env.GEMINI_CLI_TRUST_WORKSPACE !== "string") {
+  // Paperclip runs Gemini non-interactively (headless), where the CLI's
+  // trusted-folders prompt cannot be satisfied. Default to trusting the
+  // workspace unless the operator has set GEMINI_CLI_TRUST_WORKSPACE explicitly.
+  if (typeof env.GEMINI_CLI_TRUST_WORKSPACE !== "string") {
     env.GEMINI_CLI_TRUST_WORKSPACE = "true";
   }
   if (!hasExplicitApiKey && authToken) {
