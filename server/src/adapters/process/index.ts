@@ -8,6 +8,10 @@ export const processAdapter: ServerAdapterModule = {
   testEnvironment,
   models: [],
   supportsScriptBundle: true,
+  // Scripts call back into the Paperclip API to close their assigned task —
+  // they need PAPERCLIP_API_KEY in env, which is only minted when this flag
+  // is set.
+  supportsLocalAgentJwt: true,
   agentConfigurationDoc: `# process agent configuration
 
 Adapter: process
