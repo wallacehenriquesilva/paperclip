@@ -492,7 +492,7 @@ function wikiMaintainerAgent(): Agent {
     spentMonthlyCents: 0,
     pauseReason: null,
     pausedAt: null,
-    permissions: { canCreateAgents: false },
+    permissions: { canCreateAgents: false, autoApproveHumanCheckpoints: false },
     lastHeartbeatAt: null,
     metadata: {
       paperclipManagedResource: {

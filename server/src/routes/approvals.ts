@@ -10,6 +10,7 @@ import {
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
 import {
+  agentService,
   approvalService,
   heartbeatService,
   issueApprovalService,
@@ -38,7 +39,11 @@ export function approvalRoutes(
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db);
+  const agentsSvc = agentService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  const AUTO_APPROVE_ACTOR_ID = "system:auto-approve";
+  const AUTO_APPROVE_DECISION_NOTE = "Auto-approved by agent permission";
 
   async function requireApprovalAccess(req: Request, id: string) {
     const approval = await svc.getById(id);
@@ -118,7 +123,36 @@ export function approvalRoutes(
       details: { type: approval.type, issueIds: uniqueIssueIds },
     });
 
-    res.status(201).json(redactApprovalPayload(approval));
+    let resolved = approval;
+    if (approval.type === "request_board_approval" && approval.requestedByAgentId) {
+      const requester = await agentsSvc.getById(approval.requestedByAgentId);
+      if (requester?.permissions?.autoApproveHumanCheckpoints) {
+        const { approval: approved, applied } = await svc.approve(
+          approval.id,
+          AUTO_APPROVE_ACTOR_ID,
+          AUTO_APPROVE_DECISION_NOTE,
+        );
+        if (applied) {
+          await logActivity(db, {
+            companyId,
+            actorType: "user",
+            actorId: AUTO_APPROVE_ACTOR_ID,
+            action: "approval.auto_approved",
+            entityType: "approval",
+            entityId: approval.id,
+            details: {
+              type: approval.type,
+              reason: "agent_permission",
+              requestedByAgentId: approval.requestedByAgentId,
+              linkedIssueIds: uniqueIssueIds,
+            },
+          });
+        }
+        resolved = approved;
+      }
+    }
+
+    res.status(201).json(redactApprovalPayload(resolved));
   });
 
   router.get("/approvals/:id/issues", async (req, res) => {

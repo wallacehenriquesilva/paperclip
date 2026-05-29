@@ -12,6 +12,7 @@ import type {
 
 export interface AgentPermissions {
   canCreateAgents: boolean;
+  autoApproveHumanCheckpoints: boolean;
 }
 
 export interface AgentModelProfileConfig {

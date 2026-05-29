@@ -37,6 +37,10 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { issueService } from "./issues.js";
+import { agentService } from "./agents.js";
+import { logActivity } from "./activity-log.js";
+
+const AUTO_APPROVE_USER_ID = "system:auto-approve";
 
 type InteractionActor = {
   agentId?: string | null;
@@ -720,6 +724,41 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       await touchIssue(db, issue.id);
+
+      // Agents with the autoApproveHumanCheckpoints permission don't pause for
+      // inline request_confirmation prompts (e.g. plan approval). We accept
+      // the interaction synchronously here with a system actor so the agent
+      // sees status=accepted on the response of POST /interactions and can
+      // continue without a human round-trip. Other interaction kinds
+      // (suggest_tasks, etc.) still require explicit human acceptance.
+      if (data.kind === "request_confirmation" && actor.agentId) {
+        const creatingAgent = await agentService(db).getById(actor.agentId);
+        if (creatingAgent?.permissions?.autoApproveHumanCheckpoints) {
+          const { interaction: accepted } = await acceptRequestConfirmation({
+            issue,
+            current: created,
+            actor: { agentId: null, userId: AUTO_APPROVE_USER_ID },
+          });
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: "user",
+            actorId: AUTO_APPROVE_USER_ID,
+            agentId: null,
+            action: "issue.thread_interaction_auto_accepted",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              interactionId: accepted.id,
+              interactionKind: accepted.kind,
+              interactionStatus: accepted.status,
+              reason: "agent_permission",
+              createdByAgentId: actor.agentId,
+            },
+          });
+          return accepted;
+        }
+      }
+
       return hydrateInteraction(created);
     },
 

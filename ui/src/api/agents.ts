@@ -69,6 +69,7 @@ export interface AgentHireResponse {
 export interface AgentPermissionUpdate {
   canCreateAgents: boolean;
   canAssignTasks: boolean;
+  autoApproveHumanCheckpoints?: boolean;
 }
 
 export interface AgentWakeRequest {
