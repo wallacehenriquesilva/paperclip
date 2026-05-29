@@ -115,6 +115,8 @@ function toCompanyMcpServer(row: CompanyMcpServerRow): CompanyMcpServer {
     transport: row.transport as McpServerTransport,
     command: row.command,
     args: row.args ?? [],
+    url: row.url ?? null,
+    oauthConfig: row.oauthConfig ?? null,
     envTemplate: row.envTemplate ?? {},
     enabled: row.enabled,
     metadata: row.metadata ?? null,
@@ -138,6 +140,8 @@ function toListItem(server: CompanyMcpServer): CompanyMcpServerListItem {
     enabled: server.enabled,
     envKeys,
     hasSecretReferences,
+    hasOAuth: server.oauthConfig !== null,
+    oauthStatus: null,
     createdAt: server.createdAt,
     updatedAt: server.updatedAt,
   };
@@ -280,6 +284,20 @@ async function runMcpHandshake(
       },
     });
   });
+}
+
+export interface ResolveMcpRuntimeConfigOptions {
+  /**
+   * Optional OAuth token resolver. When provided, HTTP/SSE servers with
+   * oauthConfig will have `Authorization: Bearer <token>` injected into
+   * `headers`. When the resolver returns `null` (no token, needs_reauth,
+   * revoked), the server is skipped from the output instead of throwing —
+   * so an unauthorized MCP never breaks an agent run.
+   */
+  oauthTokenResolver?: (
+    companyId: string,
+    mcpServerId: string,
+  ) => Promise<string | null>;
 }
 
 export function companyMcpServerService(db: Db) {
@@ -435,11 +453,21 @@ export function companyMcpServerService(db: Db) {
     const name = asString(input.name);
     if (!name) throw unprocessable("name is required");
 
-    const command = asString(input.command);
-    if (!command) throw unprocessable("command is required");
-
+    const transport = input.transport ?? "stdio";
     const args = input.args ?? [];
-    assertCommandAllowed(command, args);
+    let command = "";
+    let url: string | null = null;
+    let oauthConfig: CompanyMcpServer["oauthConfig"] = null;
+
+    if (transport === "stdio") {
+      command = asString(input.command) ?? "";
+      if (!command) throw unprocessable("command is required when transport is stdio");
+      assertCommandAllowed(command, args);
+    } else {
+      url = asString(input.url) ?? null;
+      if (!url) throw unprocessable("url is required when transport is streamable_http or sse");
+      oauthConfig = input.oauthConfig ?? null;
+    }
 
     const desiredKey = asString(input.key ?? null) ?? normalizeKey(name);
     if (!desiredKey) throw unprocessable("Could not derive a key for the MCP server");
@@ -450,7 +478,6 @@ export function companyMcpServerService(db: Db) {
       throw conflict(`MCP server "${desiredKey}" already exists in this company.`);
     }
 
-    const transport = input.transport ?? "stdio";
     const envTemplate = await buildEnvTemplate(companyId, input.env, desiredKey, actor);
 
     const now = new Date();
@@ -464,6 +491,8 @@ export function companyMcpServerService(db: Db) {
         transport,
         command,
         args,
+        url,
+        oauthConfig,
         envTemplate,
         enabled: input.enabled ?? true,
         metadata: input.metadata ?? null,
@@ -498,14 +527,41 @@ export function companyMcpServerService(db: Db) {
     if (patch.description !== undefined) {
       next.description = patch.description ?? null;
     }
-    if (patch.command !== undefined || patch.args !== undefined) {
-      const command = asString(patch.command ?? current.command);
-      if (!command) throw unprocessable("command cannot be empty");
-      const args = patch.args ?? current.args;
-      assertCommandAllowed(command, args);
-      next.command = command;
-      next.args = args;
+    const nextTransport = patch.transport ?? current.transport;
+    if (patch.transport !== undefined) {
+      next.transport = patch.transport;
     }
+
+    if (nextTransport === "stdio") {
+      if (patch.command !== undefined || patch.args !== undefined || patch.transport !== undefined) {
+        const command = asString(patch.command ?? current.command);
+        if (!command) throw unprocessable("command is required when transport is stdio");
+        const args = patch.args ?? current.args;
+        assertCommandAllowed(command, args);
+        next.command = command;
+        next.args = args;
+      }
+      if (patch.transport !== undefined) {
+        // Switching back to stdio clears HTTP-only fields.
+        next.url = null;
+        next.oauthConfig = null;
+      }
+    } else {
+      if (patch.url !== undefined || patch.transport !== undefined) {
+        const url = asString(patch.url ?? current.url) ?? null;
+        if (!url) throw unprocessable("url is required when transport is streamable_http or sse");
+        next.url = url;
+      }
+      if (patch.oauthConfig !== undefined) {
+        next.oauthConfig = patch.oauthConfig ?? null;
+      }
+      if (patch.transport !== undefined) {
+        // Switching to HTTP/SSE clears the stdio command/args.
+        next.command = "";
+        next.args = [];
+      }
+    }
+
     if (patch.env !== undefined) {
       next.envTemplate = await buildEnvTemplate(companyId, patch.env, current.key, actor);
     }
@@ -549,6 +605,7 @@ export function companyMcpServerService(db: Db) {
   async function resolveRuntimeConfig(
     companyId: string,
     mcpServerIds: string[],
+    options: ResolveMcpRuntimeConfigOptions = {},
   ): Promise<ResolvedMcpServer[]> {
     if (mcpServerIds.length === 0) return [];
     const seen = new Set<string>();
@@ -583,6 +640,23 @@ export function companyMcpServerService(db: Db) {
         });
       }
 
+      const headers: Record<string, string> = {};
+      const needsOAuth = server.transport !== "stdio" && server.oauthConfig !== null;
+      if (needsOAuth) {
+        if (!options.oauthTokenResolver) {
+          // No resolver passed: caller did not opt into auth injection. Skip
+          // OAuth-protected servers silently so we don't materialize an
+          // unauthenticated config that would fail at runtime.
+          continue;
+        }
+        const token = await options.oauthTokenResolver(companyId, server.id);
+        if (!token) {
+          // needs_reauth, revoked, or never authorized — skip this server.
+          continue;
+        }
+        headers.authorization = `Bearer ${token}`;
+      }
+
       out.push({
         id: server.id,
         key: server.key,
@@ -591,6 +665,8 @@ export function companyMcpServerService(db: Db) {
         command: server.command,
         args: server.args,
         env: resolvedEnv,
+        url: server.url,
+        headers,
       });
     }
 
@@ -600,6 +676,7 @@ export function companyMcpServerService(db: Db) {
   async function resolveRuntimeConfigSafe(
     companyId: string,
     mcpServerIds: string[],
+    options: ResolveMcpRuntimeConfigOptions = {},
   ): Promise<{ resolved: ResolvedMcpServer[]; warnings: string[] }> {
     const resolved: ResolvedMcpServer[] = [];
     const warnings: string[] = [];
@@ -608,7 +685,7 @@ export function companyMcpServerService(db: Db) {
       if (seen.has(id)) continue;
       seen.add(id);
       try {
-        const [server] = await resolveRuntimeConfig(companyId, [id]);
+        const [server] = await resolveRuntimeConfig(companyId, [id], options);
         if (server) resolved.push(server);
       } catch (err) {
         warnings.push(err instanceof Error ? err.message : String(err));

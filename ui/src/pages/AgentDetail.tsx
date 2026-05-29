@@ -1663,6 +1663,7 @@ function ConfigurationTab({
 
   const canCreateAgents = Boolean(agent.permissions?.canCreateAgents);
   const canAssignTasks = Boolean(agent.access?.canAssignTasks);
+  const autoApproveHumanCheckpoints = Boolean(agent.permissions?.autoApproveHumanCheckpoints);
   const taskAssignSource = agent.access?.taskAssignSource ?? "none";
   const taskAssignLocked = agent.role === "ceo" || canCreateAgents;
   const taskAssignHint =
@@ -1728,6 +1729,27 @@ function ConfigurationTab({
                 })
               }
               disabled={updatePermissions.isPending || taskAssignLocked}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4 text-sm">
+            <div className="space-y-1">
+              <div>Auto-approve human checkpoints</div>
+              <p className="text-xs text-muted-foreground">
+                Skips human review whenever this agent pauses to ask the board for approval
+                or to confirm a plan/document inline in an issue thread. The approval is
+                recorded as resolved by <code>system:auto-approve</code> for audit.
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={autoApproveHumanCheckpoints}
+              onCheckedChange={() =>
+                updatePermissions.mutate({
+                  canCreateAgents,
+                  canAssignTasks,
+                  autoApproveHumanCheckpoints: !autoApproveHumanCheckpoints,
+                })
+              }
+              disabled={updatePermissions.isPending}
             />
           </div>
         </div>

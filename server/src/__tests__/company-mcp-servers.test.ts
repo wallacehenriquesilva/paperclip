@@ -82,6 +82,57 @@ describeEmbeddedPostgres("companyMcpServerService", () => {
     return companyId;
   }
 
+  it("creates a streamable_http server without requiring a command", async () => {
+    const companyId = await seedCompany();
+
+    const server = await svc.create(companyId, {
+      name: "Figma",
+      transport: "streamable_http",
+      url: "https://mcp.figma.com",
+    });
+
+    expect(server.transport).toBe("streamable_http");
+    expect(server.url).toBe("https://mcp.figma.com");
+    expect(server.command).toBe("");
+    expect(server.oauthConfig).toBeNull();
+  });
+
+  it("creates an SSE server without requiring a command", async () => {
+    const companyId = await seedCompany();
+
+    const server = await svc.create(companyId, {
+      name: "Linear",
+      transport: "sse",
+      url: "https://mcp.linear.app/sse",
+    });
+
+    expect(server.transport).toBe("sse");
+    expect(server.url).toBe("https://mcp.linear.app/sse");
+    expect(server.command).toBe("");
+  });
+
+  it("rejects a streamable_http server without a url", async () => {
+    const companyId = await seedCompany();
+
+    await expect(
+      svc.create(companyId, {
+        name: "No-url-server",
+        transport: "streamable_http",
+      }),
+    ).rejects.toThrow(/url is required/i);
+  });
+
+  it("rejects a stdio server without a command", async () => {
+    const companyId = await seedCompany();
+
+    await expect(
+      svc.create(companyId, {
+        name: "No-command-server",
+        transport: "stdio",
+      } as any),
+    ).rejects.toThrow(/command is required/i);
+  });
+
   it("creates a server with literal env values", async () => {
     const companyId = await seedCompany();
 

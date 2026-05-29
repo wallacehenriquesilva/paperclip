@@ -17,6 +17,9 @@ function createApp(opts: { enabled: boolean; allowedHostnames?: string[]; bindHo
   app.get("/api/health", (_req, res) => {
     res.status(200).json({ status: "ok" });
   });
+  app.post("/api/routine-triggers/public/:id/fire", (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
   app.get("/dashboard", (_req, res) => {
     res.status(200).send("ok");
   });
@@ -47,6 +50,18 @@ describe("privateHostnameGuard", () => {
     const res = await request(app).get("/api/health").set("Host", `${unknownHostname}:3100`);
     expect(res.status).toBe(403);
     expect(res.body?.error).toContain(`please run pnpm paperclipai allowed-hostname ${unknownHostname}`);
+  });
+
+  it("bypasses the guard for public routine trigger webhooks (Slack/GitHub/etc.)", async () => {
+    const app = createApp({ enabled: true, allowedHostnames: ["paperclip"] });
+    const res = await request(app)
+      .post("/api/routine-triggers/public/abc123/fire")
+      .set("Host", `${unknownHostname}:3100`)
+      .send({ type: "url_verification", challenge: "x" });
+    // Even though the hostname is not on the allowlist, public webhooks
+    // must reach the route handler — they have their own signature checks.
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
   });
 
   it("blocks unknown hostnames on page routes with plain-text remediation command", async () => {

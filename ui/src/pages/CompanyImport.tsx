@@ -761,10 +761,17 @@ export function CompanyImport() {
       setSkippedSlugs(new Set());
       setConfirmedSlugs(new Set());
 
-      // Initialize adapter overrides — default all agents to the CEO's adapter type
+      // Initialize adapter overrides — preserve the manifest's adapter type
+      // when this instance knows it; only fall back to the CEO's adapter for
+      // unknown types (e.g. a plugin adapter that isn't installed here).
+      // Script bundles (process) and HTTP agents lose all behavior if
+      // silently swapped to a CLI adapter — preserving the type is critical.
+      const knownAdapterTypes = new Set(IMPORT_ADAPTER_OPTIONS.map((opt) => opt.value));
       const defaultAdapters: Record<string, string> = {};
       for (const agent of result.manifest.agents) {
-        defaultAdapters[agent.slug] = ceoAdapterType;
+        defaultAdapters[agent.slug] = knownAdapterTypes.has(agent.adapterType)
+          ? agent.adapterType
+          : ceoAdapterType;
       }
       setAdapterOverrides(defaultAdapters);
       setAdapterExpandedSlugs(new Set());
@@ -1043,7 +1050,7 @@ export function CompanyImport() {
   function handleAdapterConfigChange(slug: string, patch: Partial<CreateConfigValues>) {
     setAdapterConfigValues((prev) => ({
       ...prev,
-      [slug]: { ...(prev[slug] ?? { ...defaultCreateValues, adapterType: adapterOverrides[slug] ?? "claude_local" }), ...patch },
+      [slug]: { ...(prev[slug] ?? { ...defaultCreateValues, adapterType: adapterOverrides[slug] ?? ceoAdapterType }), ...patch },
     }));
   }
 

@@ -12,12 +12,15 @@ import type {
 import { parseSecretReference } from "@paperclipai/shared";
 import {
   CheckCircle2,
+  Copy,
+  ExternalLink,
   KeyRound,
   Lock,
   Plug,
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   Trash2,
   X,
 } from "lucide-react";
@@ -43,24 +46,58 @@ interface EnvRow {
   value: string;
 }
 
+interface OAuthFormState {
+  enabled: boolean;
+  dynamicRegistration: boolean;
+  provider: string;
+  clientId: string;
+  clientSecretRef: string;
+  authorizationUrl: string;
+  tokenUrl: string;
+  revocationUrl: string;
+  scopes: string[];
+  scopeDraft: string;
+  audience: string;
+}
+
 interface FormState {
   name: string;
   key: string;
   description: string;
+  transport: "stdio" | "streamable_http" | "sse";
   command: string;
   args: string[];
   argDraft: string;
+  url: string;
+  oauth: OAuthFormState;
   envRows: EnvRow[];
   enabled: boolean;
 }
+
+const EMPTY_OAUTH: OAuthFormState = {
+  enabled: false,
+  dynamicRegistration: false,
+  provider: "",
+  clientId: "",
+  clientSecretRef: "",
+  authorizationUrl: "",
+  tokenUrl: "",
+  revocationUrl: "",
+  scopes: [],
+  scopeDraft: "",
+  audience: "",
+};
 
 const EMPTY_FORM: FormState = {
   name: "",
   key: "",
   description: "",
+  transport: "stdio",
   command: "",
   args: [],
   argDraft: "",
+  url: "",
+  oauth: EMPTY_OAUTH,
   envRows: [],
   enabled: true,
 };
@@ -73,15 +110,59 @@ function detailToForm(server: CompanyMcpServer): FormState {
     }
     return { key: envKey, kind: "literal", value: raw };
   });
+  const oauth: OAuthFormState = server.oauthConfig
+    ? {
+      enabled: true,
+      dynamicRegistration: server.oauthConfig.dynamicRegistration === true,
+      provider: server.oauthConfig.provider ?? "",
+      clientId: server.oauthConfig.clientId ?? "",
+      clientSecretRef: server.oauthConfig.clientSecretRef ?? "",
+      authorizationUrl: server.oauthConfig.authorizationUrl ?? "",
+      tokenUrl: server.oauthConfig.tokenUrl ?? "",
+      revocationUrl: server.oauthConfig.revocationUrl ?? "",
+      scopes: server.oauthConfig.scopes ?? [],
+      scopeDraft: "",
+      audience: server.oauthConfig.audience ?? "",
+    }
+    : EMPTY_OAUTH;
   return {
     name: server.name,
     key: server.key,
     description: server.description ?? "",
+    transport: (server.transport as FormState["transport"]) ?? "stdio",
     command: server.command,
     args: server.args,
     argDraft: "",
+    url: server.url ?? "",
+    oauth,
     envRows,
     enabled: server.enabled,
+  };
+}
+
+function oauthFormToInput(oauth: OAuthFormState) {
+  if (!oauth.enabled) return null;
+  if (oauth.dynamicRegistration) {
+    // DCR mode: only provider (label) and optional scopes are required;
+    // endpoints + client credentials are discovered/registered at authorize time.
+    return {
+      provider: oauth.provider.trim(),
+      dynamicRegistration: true,
+      scopes: oauth.scopes.length > 0 ? oauth.scopes : undefined,
+      audience: oauth.audience.trim() || undefined,
+      usePkce: true,
+    };
+  }
+  return {
+    provider: oauth.provider.trim(),
+    clientId: oauth.clientId.trim(),
+    clientSecretRef: oauth.clientSecretRef.trim(),
+    authorizationUrl: oauth.authorizationUrl.trim(),
+    tokenUrl: oauth.tokenUrl.trim(),
+    revocationUrl: oauth.revocationUrl.trim() || null,
+    scopes: oauth.scopes,
+    audience: oauth.audience.trim() || null,
+    usePkce: true,
   };
 }
 
@@ -169,7 +250,25 @@ function McpServerForm({
     }));
   }
 
-  const submitDisabled = pending || !form.name.trim() || !form.command.trim();
+  const isStdio = form.transport === "stdio";
+  const submitDisabled =
+    pending ||
+    !form.name.trim() ||
+    (isStdio ? !form.command.trim() : !form.url.trim());
+
+  function setOAuth(patch: Partial<OAuthFormState>) {
+    setForm((prev) => ({ ...prev, oauth: { ...prev.oauth, ...patch } }));
+  }
+
+  function addScope() {
+    const next = form.oauth.scopeDraft.trim();
+    if (!next || form.oauth.scopes.includes(next)) return;
+    setOAuth({ scopes: [...form.oauth.scopes, next], scopeDraft: "" });
+  }
+
+  function removeScope(idx: number) {
+    setOAuth({ scopes: form.oauth.scopes.filter((_, i) => i !== idx) });
+  }
 
   return (
     <div className="space-y-6">
@@ -202,50 +301,92 @@ function McpServerForm({
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Process (stdio)</h2>
-        <Input
-          value={form.command}
-          onChange={(event) => setForm((prev) => ({ ...prev, command: event.target.value }))}
-          placeholder="Command (e.g. npx or /path/to/binary)"
-        />
-        <div className="space-y-2">
-          <div className="text-xs text-muted-foreground">Arguments</div>
-          <div className="flex flex-wrap gap-2">
-            {form.args.map((arg, index) => (
-              <span
-                key={`${arg}-${index}`}
-                className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs font-mono"
-              >
-                {arg}
-                <button
-                  type="button"
-                  onClick={() => removeArg(index)}
-                  className="text-muted-foreground hover:text-foreground"
-                  aria-label={`Remove argument ${arg}`}
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <Input
-              value={form.argDraft}
-              onChange={(event) => setForm((prev) => ({ ...prev, argDraft: event.target.value }))}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  appendArg();
-                }
-              }}
-              placeholder="Add argument and press Enter"
-            />
-            <Button size="sm" variant="ghost" onClick={appendArg} disabled={!form.argDraft.trim()}>
-              Add
-            </Button>
-          </div>
+        <h2 className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Transport</h2>
+        <div className="inline-flex rounded-md border border-border bg-muted/30 p-0.5">
+          {(["stdio", "streamable_http", "sse"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setForm((prev) => ({ ...prev, transport: t }))}
+              className={cn(
+                "rounded-sm px-3 py-1 text-xs font-medium transition-colors",
+                form.transport === t
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {t === "stdio" ? "stdio" : t === "streamable_http" ? "HTTP" : "SSE"}
+            </button>
+          ))}
         </div>
+        <p className="text-[11px] text-muted-foreground">
+          {form.transport === "stdio"
+            ? "Spawns a local process (current default for community MCPs)."
+            : form.transport === "streamable_http"
+              ? "Remote MCP over HTTP (Streamable HTTP transport, e.g. Figma/Notion/Slack)."
+              : "Remote MCP over Server-Sent Events (legacy transport)."}
+        </p>
       </section>
+
+      {isStdio ? (
+        <section className="space-y-3">
+          <h2 className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Process (stdio)</h2>
+          <Input
+            value={form.command}
+            onChange={(event) => setForm((prev) => ({ ...prev, command: event.target.value }))}
+            placeholder="Command (e.g. npx or /path/to/binary)"
+          />
+          <div className="space-y-2">
+            <div className="text-xs text-muted-foreground">Arguments</div>
+            <div className="flex flex-wrap gap-2">
+              {form.args.map((arg, index) => (
+                <span
+                  key={`${arg}-${index}`}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs font-mono"
+                >
+                  {arg}
+                  <button
+                    type="button"
+                    onClick={() => removeArg(index)}
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label={`Remove argument ${arg}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <Input
+                value={form.argDraft}
+                onChange={(event) => setForm((prev) => ({ ...prev, argDraft: event.target.value }))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    appendArg();
+                  }
+                }}
+                placeholder="Add argument and press Enter"
+              />
+              <Button size="sm" variant="ghost" onClick={appendArg} disabled={!form.argDraft.trim()}>
+                Add
+              </Button>
+            </div>
+          </div>
+        </section>
+      ) : (
+        <section className="space-y-3">
+          <h2 className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Server URL</h2>
+          <Input
+            value={form.url}
+            onChange={(event) => setForm((prev) => ({ ...prev, url: event.target.value }))}
+            placeholder="https://mcp.provider.example/v1"
+            type="url"
+            className="font-mono"
+          />
+          <OAuthSection oauth={form.oauth} setOAuth={setOAuth} onAddScope={addScope} onRemoveScope={removeScope} />
+        </section>
+      )}
 
       <section className="space-y-3">
         <div className="flex items-center justify-between">
@@ -347,6 +488,147 @@ function McpServerForm({
         </div>
       ) : null}
       {testResult ? <TestResultPanel result={testResult} /> : null}
+    </div>
+  );
+}
+
+function OAuthSection({
+  oauth,
+  setOAuth,
+  onAddScope,
+  onRemoveScope,
+}: {
+  oauth: OAuthFormState;
+  setOAuth: (patch: Partial<OAuthFormState>) => void;
+  onAddScope: () => void;
+  onRemoveScope: (idx: number) => void;
+}) {
+  return (
+    <div className="mt-4 rounded-md border border-border bg-muted/20 p-3 space-y-3">
+      <label className="flex items-center justify-between gap-2 text-sm">
+        <span className="font-medium">Requires OAuth (login flow)</span>
+        <ToggleSwitch
+          checked={oauth.enabled}
+          onCheckedChange={(value) => setOAuth({ enabled: value })}
+        />
+      </label>
+      {oauth.enabled ? (
+        <div className="space-y-3">
+          <label className="flex items-center justify-between gap-2 text-sm">
+            <div className="space-y-1">
+              <span className="font-medium">Use dynamic client registration (RFC 7591)</span>
+              <p className="text-[11px] text-muted-foreground">
+                When ON, Paperclip discovers the OAuth endpoints from the MCP server's{" "}
+                <code className="font-mono">.well-known/oauth-protected-resource</code> and
+                registers itself dynamically — no need to register an OAuth app manually.
+                Required for the official Notion hosted MCP.
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={oauth.dynamicRegistration}
+              onCheckedChange={(value) => setOAuth({ dynamicRegistration: value })}
+            />
+          </label>
+          <Input
+            value={oauth.provider}
+            onChange={(e) => setOAuth({ provider: e.target.value })}
+            placeholder="provider label (e.g. notion, figma)"
+            className="font-mono"
+          />
+          {oauth.dynamicRegistration ? (
+            <p className="text-[11px] text-muted-foreground">
+              Endpoints + client credentials will be discovered and registered on first
+              authorize. You only need the MCP server URL (above) and an optional list of
+              scopes if you want to request a subset of what the server offers.
+            </p>
+          ) : (
+            <>
+              <p className="text-[11px] text-muted-foreground">
+                Register an OAuth app with the provider (Figma/Slack/GitHub/etc.), set its
+                redirect URI to the callback URL shown on this server's detail page, then
+                paste client credentials below. <code className="font-mono">client_secret</code>{" "}
+                must be stored as a Paperclip secret and referenced via{" "}
+                <code className="font-mono">$&#123;secret:...&#125;</code>.
+              </p>
+              <Input
+                value={oauth.clientId}
+                onChange={(e) => setOAuth({ clientId: e.target.value })}
+                placeholder="client_id"
+                className="font-mono"
+              />
+              <Input
+                value={oauth.clientSecretRef}
+                onChange={(e) => setOAuth({ clientSecretRef: e.target.value })}
+                placeholder="${secret:your-secret-key}"
+                className="font-mono"
+              />
+              <Input
+                value={oauth.authorizationUrl}
+                onChange={(e) => setOAuth({ authorizationUrl: e.target.value })}
+                placeholder="authorization endpoint URL (https://...)"
+                className="font-mono"
+              />
+              <Input
+                value={oauth.tokenUrl}
+                onChange={(e) => setOAuth({ tokenUrl: e.target.value })}
+                placeholder="token endpoint URL (https://...)"
+                className="font-mono"
+              />
+              <Input
+                value={oauth.revocationUrl}
+                onChange={(e) => setOAuth({ revocationUrl: e.target.value })}
+                placeholder="revocation endpoint URL (optional)"
+                className="font-mono"
+              />
+            </>
+          )}
+          <Input
+            value={oauth.audience}
+            onChange={(e) => setOAuth({ audience: e.target.value })}
+            placeholder="audience (optional)"
+            className="font-mono"
+          />
+          <div className="space-y-2">
+            <div className="text-xs text-muted-foreground">
+              Scopes {oauth.dynamicRegistration ? "(optional)" : ""}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {oauth.scopes.map((scope, index) => (
+                <span
+                  key={`${scope}-${index}`}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs font-mono"
+                >
+                  {scope}
+                  <button
+                    type="button"
+                    onClick={() => onRemoveScope(index)}
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label={`Remove scope ${scope}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <Input
+                value={oauth.scopeDraft}
+                onChange={(e) => setOAuth({ scopeDraft: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    onAddScope();
+                  }
+                }}
+                placeholder="Add scope and press Enter (e.g. files:read)"
+              />
+              <Button size="sm" variant="ghost" onClick={onAddScope} disabled={!oauth.scopeDraft.trim()}>
+                Add
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -664,25 +946,33 @@ export function CompanyMcpServers() {
   }
 
   function handleSubmitCreate() {
+    const isStdio = form.transport === "stdio";
     createMutation.mutate({
       name: form.name.trim(),
       key: form.key.trim() || undefined,
       description: form.description.trim() || null,
-      command: form.command.trim(),
-      args: form.args,
+      transport: form.transport,
+      command: isStdio ? form.command.trim() : "",
+      args: isStdio ? form.args : [],
+      url: isStdio ? null : form.url.trim() || null,
+      oauthConfig: isStdio ? null : oauthFormToInput(form.oauth),
       env: envRowsToInput(form.envRows),
       enabled: form.enabled,
     });
   }
 
   function handleSubmitUpdate(id: string) {
+    const isStdio = form.transport === "stdio";
     updateMutation.mutate({
       id,
       payload: {
         name: form.name.trim(),
         description: form.description.trim() || null,
-        command: form.command.trim(),
-        args: form.args,
+        transport: form.transport,
+        command: isStdio ? form.command.trim() : "",
+        args: isStdio ? form.args : [],
+        url: isStdio ? null : form.url.trim() || null,
+        oauthConfig: isStdio ? null : oauthFormToInput(form.oauth),
         env: envRowsToInput(form.envRows),
         enabled: form.enabled,
       },
@@ -735,8 +1025,15 @@ export function CompanyMcpServers() {
         ) : !detailQuery.data ? (
           <EmptyState icon={Plug} message="Server not found." />
         ) : (
-          <div className="max-w-3xl">
-            <h2 className="mb-4 text-xl font-semibold">{detailQuery.data.name}</h2>
+          <div className="max-w-3xl space-y-6">
+            <h2 className="text-xl font-semibold">{detailQuery.data.name}</h2>
+            {detailQuery.data.oauthConfig ? (
+              <McpOAuthPanel
+                companyId={selectedCompanyId!}
+                serverId={detailQuery.data.id}
+                providerLabel={detailQuery.data.oauthConfig.provider}
+              />
+            ) : null}
             <McpServerForm
               form={form}
               setForm={setForm}
@@ -757,5 +1054,180 @@ export function CompanyMcpServers() {
         )}
       </main>
     </div>
+  );
+}
+
+function McpOAuthPanel({
+  companyId,
+  serverId,
+  providerLabel,
+}: {
+  companyId: string;
+  serverId: string;
+  providerLabel: string;
+}) {
+  const queryClient = useQueryClient();
+  const { pushToast } = useToastActions();
+  const [popupOpen, setPopupOpen] = useState(false);
+
+  const statusQuery = useQuery({
+    queryKey: ["mcp-oauth-status", companyId, serverId],
+    queryFn: () => companyMcpServersApi.oauthStatus(companyId, serverId),
+    refetchInterval: popupOpen ? 2000 : false,
+  });
+
+  const callbackUrlQuery = useQuery({
+    queryKey: ["mcp-oauth-callback-url", companyId],
+    queryFn: () => companyMcpServersApi.oauthCallbackUrl(companyId),
+  });
+
+  const authorizeMutation = useMutation({
+    mutationFn: () => companyMcpServersApi.oauthAuthorize(companyId, serverId),
+    onSuccess: (result) => {
+      const popup = window.open(
+        result.authorizationUrl,
+        "paperclip-oauth",
+        "width=520,height=720,scrollbars=yes",
+      );
+      if (!popup) {
+        pushToast({
+          tone: "error",
+          title: "Popup blocked",
+          body: "Allow popups for this site to authorize MCP OAuth",
+        });
+        return;
+      }
+      setPopupOpen(true);
+      const interval = window.setInterval(() => {
+        if (popup.closed) {
+          window.clearInterval(interval);
+          setPopupOpen(false);
+          queryClient.invalidateQueries({
+            queryKey: ["mcp-oauth-status", companyId, serverId],
+          });
+        }
+      }, 800);
+    },
+    onError: (err) => {
+      pushToast({
+        tone: "error",
+        title: "Could not start OAuth",
+        body: err instanceof Error ? err.message : String(err),
+      });
+    },
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: () => companyMcpServersApi.oauthRevoke(companyId, serverId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["mcp-oauth-status", companyId, serverId],
+      });
+      pushToast({ tone: "success", title: "OAuth revoked", body: providerLabel });
+    },
+    onError: (err) => {
+      pushToast({
+        tone: "error",
+        title: "Revoke failed",
+        body: err instanceof Error ? err.message : String(err),
+      });
+    },
+  });
+
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      const data = event.data as { paperclipOAuth?: { status: string; mcpServerId: string | null } };
+      if (data?.paperclipOAuth && data.paperclipOAuth.mcpServerId === serverId) {
+        queryClient.invalidateQueries({
+          queryKey: ["mcp-oauth-status", companyId, serverId],
+        });
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [companyId, serverId, queryClient]);
+
+  const status = statusQuery.data?.status ?? "needs_authorization";
+  const isConnected = status === "active" || status === "connected";
+  const callbackUrl = callbackUrlQuery.data?.callbackUrl;
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+          <span className="text-sm font-medium">OAuth · {providerLabel}</span>
+          <OAuthStatusBadge status={status} />
+        </div>
+        <div className="flex items-center gap-2">
+          {isConnected ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => revokeMutation.mutate()}
+              disabled={revokeMutation.isPending}
+            >
+              Disconnect
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => authorizeMutation.mutate()}
+              disabled={authorizeMutation.isPending}
+            >
+              <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+              {status === "needs_reauth" || status === "expired" ? "Re-authorize" : "Authorize"}
+            </Button>
+          )}
+        </div>
+      </div>
+      {statusQuery.data?.expiresAt ? (
+        <p className="text-xs text-muted-foreground">
+          Token expires {new Date(statusQuery.data.expiresAt).toLocaleString()}
+          {statusQuery.data.scope ? <> · scope <code className="font-mono">{statusQuery.data.scope}</code></> : null}
+        </p>
+      ) : null}
+      {callbackUrl ? (
+        <div className="rounded-md bg-muted/40 p-2 text-xs">
+          <div className="mb-1 text-muted-foreground">Register this redirect URI with the provider:</div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 break-all font-mono text-foreground">{callbackUrl}</code>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                navigator.clipboard?.writeText(callbackUrl);
+                pushToast({ tone: "success", title: "Copied", body: "Callback URL" });
+              }}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function OAuthStatusBadge({ status }: { status: string }) {
+  const config: Record<string, { label: string; cls: string }> = {
+    not_configured: { label: "Not configured", cls: "bg-muted text-muted-foreground" },
+    needs_authorization: { label: "Not authorized", cls: "bg-muted text-muted-foreground" },
+    active: { label: "Connected", cls: "bg-green-500/10 text-green-700" },
+    connected: { label: "Connected", cls: "bg-green-500/10 text-green-700" },
+    expired: { label: "Expired", cls: "bg-amber-500/10 text-amber-700" },
+    needs_reauth: { label: "Needs re-auth", cls: "bg-red-500/10 text-red-700" },
+    revoked: { label: "Revoked", cls: "bg-red-500/10 text-red-700" },
+  };
+  const c = config[status] ?? config.needs_authorization!;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+        c.cls,
+      )}
+    >
+      {c.label}
+    </span>
   );
 }

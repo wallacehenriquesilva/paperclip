@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -40,6 +41,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(activityLog);
     await db.delete(issueThreadInteractions);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
@@ -780,6 +782,141 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       status: "todo",
       assigneeAgentId: agentId,
       assigneeUserId: null,
+    });
+  });
+
+  describe("auto-accept request_confirmation via agent permission", () => {
+    async function seedAutoApproveFixture(opts: { autoApprove: boolean }) {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({
+        id: goalId,
+        companyId,
+        title: "Plan flow",
+        level: "task",
+        status: "active",
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "DesignTranslator",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: { canCreateAgents: false, autoApproveHumanCheckpoints: opts.autoApprove },
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title: "Approve plan",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agentId,
+      });
+      return { companyId, goalId, issueId, agentId };
+    }
+
+    it("auto-accepts request_confirmation when the creating agent has the permission ON", async () => {
+      const { companyId, issueId, agentId } = await seedAutoApproveFixture({ autoApprove: true });
+
+      const interaction = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          prompt: "Apply plan v1?",
+          acceptLabel: "Apply",
+        },
+      }, {
+        agentId,
+      });
+
+      expect(interaction.status).toBe("accepted");
+      expect(interaction.kind).toBe("request_confirmation");
+      expect(interaction.resolvedByUserId).toBe("system:auto-approve");
+      expect(interaction.resolvedByAgentId).toBeNull();
+      expect(interaction.result).toMatchObject({ outcome: "accepted" });
+    });
+
+    it("leaves request_confirmation pending when the creating agent has the permission OFF", async () => {
+      const { companyId, issueId, agentId } = await seedAutoApproveFixture({ autoApprove: false });
+
+      const interaction = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          prompt: "Apply plan v1?",
+          acceptLabel: "Apply",
+        },
+      }, {
+        agentId,
+      });
+
+      expect(interaction.status).toBe("pending");
+      expect(interaction.resolvedByUserId).toBeNull();
+    });
+
+    it("does not auto-accept other interaction kinds (e.g. suggest_tasks) even when permission is ON", async () => {
+      const { companyId, issueId, agentId } = await seedAutoApproveFixture({ autoApprove: true });
+
+      const interaction = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+      }, {
+        kind: "suggest_tasks",
+        payload: {
+          version: 1,
+          tasks: [
+            { clientKey: "t1", title: "Subtask", parentClientKey: null },
+          ],
+        },
+      } as any, {
+        agentId,
+      });
+
+      expect(interaction.kind).toBe("suggest_tasks");
+      expect(interaction.status).toBe("pending");
+    });
+
+    it("does not auto-accept when a user (not the agent) creates the request_confirmation", async () => {
+      const { companyId, issueId } = await seedAutoApproveFixture({ autoApprove: true });
+
+      const interaction = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          prompt: "Manually-created prompt",
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      // Auto-accept only fires when an agent with the permission creates it.
+      expect(interaction.status).toBe("pending");
     });
   });
 

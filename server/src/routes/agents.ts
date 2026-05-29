@@ -2313,6 +2313,7 @@ export function agentRoutes(
       details: {
         canCreateAgents: agent.permissions?.canCreateAgents ?? false,
         canAssignTasks: effectiveCanAssignTasks,
+        autoApproveHumanCheckpoints: agent.permissions?.autoApproveHumanCheckpoints ?? false,
       },
     });
 

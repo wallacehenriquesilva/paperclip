@@ -2470,7 +2470,22 @@ export function routineService(
       }
       const routine = await getRoutineById(trigger.routineId);
       if (!routine) throw notFound("Routine not found");
-      if (!trigger.enabled || routine.status !== "active") throw conflict("Routine trigger is not active");
+
+      // Slack's url_verification handshake happens during initial app setup,
+      // BEFORE the operator has activated the routine. Echoing the challenge
+      // never dispatches a run, so we allow it even when the trigger or
+      // routine is inactive — handleSlackEventTrigger still verifies the
+      // signature before responding, so this is not an open endpoint.
+      const isSlackUrlVerification =
+        trigger.kind === "slack_event" &&
+        isPlainRecord(input.payload) &&
+        input.payload.type === "url_verification";
+
+      if (!isSlackUrlVerification) {
+        if (!trigger.enabled || routine.status !== "active") {
+          throw conflict("Routine trigger is not active");
+        }
+      }
 
       if (trigger.kind === "slack_event") {
         return handleSlackEventTrigger(trigger, routine, input);

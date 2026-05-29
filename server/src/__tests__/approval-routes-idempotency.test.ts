@@ -27,10 +27,15 @@ const mockSecretService = vi.hoisted(() => ({
   normalizeHireApprovalPayloadForPersistence: vi.fn(),
 }));
 
+const mockAgentService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
+    agentService: () => mockAgentService,
     approvalService: () => mockApprovalService,
     heartbeatService: () => mockHeartbeatService,
     issueApprovalService: () => mockIssueApprovalService,
@@ -106,6 +111,8 @@ describe("approval routes idempotent retries", () => {
     mockIssueApprovalService.listIssuesForApproval.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();
     mockSecretService.normalizeHireApprovalPayloadForPersistence.mockReset();
+    mockAgentService.getById.mockReset();
+    mockAgentService.getById.mockResolvedValue(null);
     mockLogActivity.mockReset();
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
@@ -335,5 +342,114 @@ describe("approval routes idempotent retries", () => {
         action: "approval.created",
       }),
     );
+  });
+
+  describe("auto-approve on creation", () => {
+    function pendingBoardApproval(overrides: Record<string, unknown> = {}) {
+      return {
+        id: "approval-auto-1",
+        companyId: "company-1",
+        type: "request_board_approval",
+        requestedByAgentId: "agent-1",
+        requestedByUserId: null,
+        status: "pending",
+        payload: { title: "ship it" },
+        decisionNote: null,
+        decidedByUserId: null,
+        decidedAt: null,
+        createdAt: new Date("2026-05-28T00:00:00.000Z"),
+        updatedAt: new Date("2026-05-28T00:00:00.000Z"),
+        ...overrides,
+      };
+    }
+
+    it("auto-approves request_board_approval when requester has the permission", async () => {
+      mockApprovalService.create.mockResolvedValue(pendingBoardApproval());
+      mockAgentService.getById.mockResolvedValue({
+        id: "agent-1",
+        companyId: "company-1",
+        permissions: { canCreateAgents: false, autoApproveHumanCheckpoints: true },
+      });
+      mockApprovalService.approve.mockResolvedValue({
+        approval: pendingBoardApproval({ status: "approved" }),
+        applied: true,
+      });
+
+      const res = await request(await createAgentApp())
+        .post("/api/companies/company-1/approvals")
+        .send({
+          type: "request_board_approval",
+          payload: { title: "ship it" },
+        });
+
+      expect([200, 201]).toContain(res.status);
+      expect(res.body).toMatchObject({ status: "approved" });
+      expect(mockApprovalService.approve).toHaveBeenCalledWith(
+        "approval-auto-1",
+        "system:auto-approve",
+        "Auto-approved by agent permission",
+      );
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          action: "approval.auto_approved",
+          details: expect.objectContaining({
+            type: "request_board_approval",
+            reason: "agent_permission",
+            requestedByAgentId: "agent-1",
+          }),
+        }),
+      );
+    });
+
+    it("leaves request_board_approval pending when requester lacks the permission", async () => {
+      mockApprovalService.create.mockResolvedValue(pendingBoardApproval());
+      mockAgentService.getById.mockResolvedValue({
+        id: "agent-1",
+        companyId: "company-1",
+        permissions: { canCreateAgents: false, autoApproveHumanCheckpoints: false },
+      });
+
+      const res = await request(await createAgentApp())
+        .post("/api/companies/company-1/approvals")
+        .send({
+          type: "request_board_approval",
+          payload: { title: "ship it" },
+        });
+
+      expect([200, 201]).toContain(res.status);
+      expect(res.body).toMatchObject({ status: "pending" });
+      expect(mockApprovalService.approve).not.toHaveBeenCalled();
+      expect(mockLogActivity).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "approval.auto_approved" }),
+      );
+    });
+
+    it("never auto-approves non-board-approval types even when permission is set", async () => {
+      mockApprovalService.create.mockResolvedValue(
+        pendingBoardApproval({
+          id: "approval-auto-2",
+          type: "budget_override_required",
+        }),
+      );
+      mockAgentService.getById.mockResolvedValue({
+        id: "agent-1",
+        companyId: "company-1",
+        permissions: { canCreateAgents: false, autoApproveHumanCheckpoints: true },
+      });
+
+      const res = await request(await createAgentApp())
+        .post("/api/companies/company-1/approvals")
+        .send({
+          type: "budget_override_required",
+          payload: { amountCents: 1000 },
+        });
+
+      expect([200, 201]).toContain(res.status);
+      expect(res.body).toMatchObject({ status: "pending" });
+      expect(mockApprovalService.approve).not.toHaveBeenCalled();
+      expect(mockAgentService.getById).not.toHaveBeenCalled();
+    });
   });
 });
