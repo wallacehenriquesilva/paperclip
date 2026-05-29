@@ -33,6 +33,20 @@ const SAMPLE_SERVER = {
   command: "npx",
   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
   env: { LOG_LEVEL: "info" },
+  url: null,
+  headers: {},
+};
+
+const SAMPLE_HTTP_SERVER = {
+  id: "srv-http",
+  key: "figma",
+  name: "Figma",
+  transport: "streamable_http" as const,
+  command: "",
+  args: [],
+  env: {},
+  url: "https://mcp.figma.com",
+  headers: { authorization: "Bearer tok-xyz" },
 };
 
 describe("readResolvedMcpServers", () => {
@@ -102,6 +116,42 @@ describe("prepareMcpBundle", () => {
         },
       },
     });
+  });
+
+  it("writes Claude config with http transport when transport is streamable_http", async () => {
+    const workspace = await makeTempWorkspace("mcp-bundle-claude-http-");
+    const result = await prepareMcpBundle({
+      adapter: "claude",
+      workspaceCwd: workspace,
+      resolvedServers: [SAMPLE_HTTP_SERVER],
+    });
+    const written = await fs.readFile(result!.configFilePath, "utf8");
+    const parsed = JSON.parse(written);
+    expect(parsed).toEqual({
+      mcpServers: {
+        figma: {
+          type: "http",
+          url: "https://mcp.figma.com",
+          headers: { authorization: "Bearer tok-xyz" },
+        },
+      },
+    });
+  });
+
+  it("writes Codex TOML with transport=http + url + headers table for HTTP MCP", async () => {
+    const workspace = await makeTempWorkspace("mcp-bundle-codex-http-");
+    const result = await prepareMcpBundle({
+      adapter: "codex",
+      workspaceCwd: workspace,
+      resolvedServers: [SAMPLE_HTTP_SERVER],
+    });
+    const written = await fs.readFile(result!.configFilePath, "utf8");
+    expect(written).toContain("[mcp_servers.figma]");
+    expect(written).toContain('transport = "http"');
+    expect(written).toContain('url = "https://mcp.figma.com"');
+    expect(written).toContain("[mcp_servers.figma.headers]");
+    expect(written).toContain('authorization = "Bearer tok-xyz"');
+    expect(written).not.toContain("command =");
   });
 
   it("writes a TOML config for codex with --config flag", async () => {
@@ -256,6 +306,15 @@ describe("buildCodexCliOverrideFlags", () => {
     ]);
     expect(flags).toEqual([
       "-c", 'mcp_servers.filesystem.command="npx"',
+    ]);
+  });
+
+  it("emits transport/url/headers overrides for HTTP MCPs", () => {
+    const flags = buildCodexCliOverrideFlags([SAMPLE_HTTP_SERVER]);
+    expect(flags).toEqual([
+      "-c", 'mcp_servers.figma.transport="http"',
+      "-c", 'mcp_servers.figma.url="https://mcp.figma.com"',
+      "-c", 'mcp_servers.figma.headers.authorization="Bearer tok-xyz"',
     ]);
   });
 });

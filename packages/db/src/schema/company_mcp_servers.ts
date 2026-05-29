@@ -10,6 +10,22 @@ import {
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
+export interface McpOAuthConfig {
+  provider: string;
+  /** When true, client_id/secret and endpoints are discovered + registered
+   * dynamically (RFC 7591 + RFC 9728). Manual fields become optional. */
+  dynamicRegistration?: boolean;
+  clientId?: string;
+  clientSecretRef?: string;
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  revocationUrl?: string | null;
+  scopes?: string[];
+  audience?: string | null;
+  usePkce?: boolean;
+  redirectPath?: string | null;
+}
+
 export const companyMcpServers = pgTable(
   "company_mcp_servers",
   {
@@ -19,8 +35,10 @@ export const companyMcpServers = pgTable(
     name: text("name").notNull(),
     description: text("description"),
     transport: text("transport").notNull().default("stdio"),
-    command: text("command").notNull(),
+    command: text("command").notNull().default(""),
     args: jsonb("args").$type<string[]>().notNull().default([]),
+    url: text("url"),
+    oauthConfig: jsonb("oauth_config").$type<McpOAuthConfig>(),
     envTemplate: jsonb("env_template").$type<Record<string, string>>().notNull().default({}),
     enabled: boolean("enabled").notNull().default(true),
     metadata: jsonb("metadata").$type<Record<string, unknown>>(),

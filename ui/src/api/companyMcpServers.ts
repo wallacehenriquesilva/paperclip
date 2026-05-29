@@ -1,4 +1,6 @@
 import type {
+  CompanyMcpOAuthAuthorizeResponse,
+  CompanyMcpOAuthStatus,
   CompanyMcpServer,
   CompanyMcpServerCreateRequest,
   CompanyMcpServerListItem,
@@ -35,5 +37,24 @@ export const companyMcpServersApi = {
     api.post<CompanyMcpServerTestResult>(
       `/companies/${encodeURIComponent(companyId)}/mcp-servers/${encodeURIComponent(id)}/test`,
       payload,
+    ),
+
+  oauthStatus: (companyId: string, id: string) =>
+    api.get<CompanyMcpOAuthStatus>(
+      `/companies/${encodeURIComponent(companyId)}/mcp-servers/${encodeURIComponent(id)}/oauth/status`,
+    ),
+  oauthAuthorize: (companyId: string, id: string) =>
+    api.post<CompanyMcpOAuthAuthorizeResponse>(
+      `/companies/${encodeURIComponent(companyId)}/mcp-servers/${encodeURIComponent(id)}/oauth/authorize`,
+      {},
+    ),
+  oauthRevoke: (companyId: string, id: string) =>
+    api.post<void>(
+      `/companies/${encodeURIComponent(companyId)}/mcp-servers/${encodeURIComponent(id)}/oauth/revoke`,
+      {},
+    ),
+  oauthCallbackUrl: (companyId: string) =>
+    api.get<{ callbackUrl: string }>(
+      `/companies/${encodeURIComponent(companyId)}/mcp-servers/oauth/callback-url`,
     ),
 };

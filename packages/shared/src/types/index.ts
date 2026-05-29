@@ -71,6 +71,10 @@ export type {
   CompanyMcpServerTestResult,
   McpServerEnvValueInput,
   ResolvedMcpServer,
+  McpOAuthConfigInput,
+  McpOAuthStatusValue,
+  CompanyMcpOAuthStatus,
+  CompanyMcpOAuthAuthorizeResponse,
 } from "./company-mcp-server.js";
 export type {
   AgentSkillSyncMode,

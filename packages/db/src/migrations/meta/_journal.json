@@ -624,6 +624,20 @@
       "when": 1779468400000,
       "tag": "0088_slack_command_trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1779468500000,
+      "tag": "0089_mcp_oauth",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1779468600000,
+      "tag": "0090_mcp_oauth_dcr",
+      "breakpoints": true
     }
   ]
 }

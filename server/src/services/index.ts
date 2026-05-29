@@ -3,6 +3,7 @@ export { companySearchService } from "./company-search.js";
 export { feedbackService } from "./feedback.js";
 export { companySkillService } from "./company-skills.js";
 export { companyMcpServerService } from "./company-mcp-servers.js";
+export { mcpOAuthService, type McpOAuthService } from "./mcp-oauth.js";
 export { agentService, deduplicateAgentName } from "./agents.js";
 export { agentGithubIdentityService } from "./agent-github-identity.js";
 export { agentInstructionsService, syncInstructionsBundleConfigFromFilePath } from "./agent-instructions.js";

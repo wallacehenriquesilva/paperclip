@@ -1,14 +1,21 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+export type ResolvedMcpTransport = "stdio" | "streamable_http" | "sse";
+
 export interface ResolvedMcpServerEntry {
   id: string;
   key: string;
   name: string;
-  transport: "stdio";
+  transport: ResolvedMcpTransport;
+  /** Empty string for non-stdio transports. */
   command: string;
   args: string[];
   env: Record<string, string>;
+  /** Required for streamable_http/sse, null otherwise. */
+  url: string | null;
+  /** HTTP request headers — e.g. `{ authorization: "Bearer ..." }` for OAuth. */
+  headers: Record<string, string>;
 }
 
 export type McpAdapterFormat = "claude" | "cursor" | "codex" | "gemini" | "opencode";
@@ -43,9 +50,22 @@ export function readResolvedMcpServers(config: Record<string, unknown>): Resolve
     const id = typeof record.id === "string" ? record.id : null;
     const key = typeof record.key === "string" ? record.key : null;
     const name = typeof record.name === "string" ? record.name : key;
-    const command = typeof record.command === "string" ? record.command : null;
-    if (!id || !key || !command) continue;
-    const transport = record.transport === "stdio" ? "stdio" : "stdio";
+    if (!id || !key) continue;
+
+    const transport: ResolvedMcpTransport =
+      record.transport === "streamable_http"
+        ? "streamable_http"
+        : record.transport === "sse"
+          ? "sse"
+          : "stdio";
+
+    const command = typeof record.command === "string" ? record.command : "";
+    const url = typeof record.url === "string" && record.url.length > 0 ? record.url : null;
+
+    // Require either a command (stdio) or a url (http/sse) — skip otherwise.
+    if (transport === "stdio" && !command) continue;
+    if (transport !== "stdio" && !url) continue;
+
     const args = Array.isArray(record.args)
       ? record.args.filter((value): value is string => typeof value === "string")
       : [];
@@ -57,21 +77,52 @@ export function readResolvedMcpServers(config: Record<string, unknown>): Resolve
     for (const [envKey, envValue] of Object.entries(envEntries)) {
       if (typeof envValue === "string") env[envKey] = envValue;
     }
-    out.push({ id, key, name: name ?? key, transport, command, args, env });
+    const headerEntries =
+      record.headers && typeof record.headers === "object" && !Array.isArray(record.headers)
+        ? (record.headers as Record<string, unknown>)
+        : {};
+    const headers: Record<string, string> = {};
+    for (const [hKey, hValue] of Object.entries(headerEntries)) {
+      if (typeof hValue === "string") headers[hKey] = hValue;
+    }
+
+    out.push({ id, key, name: name ?? key, transport, command, args, env, url, headers });
   }
   return out;
 }
 
-function buildClaudeConfig(servers: ResolvedMcpServerEntry[]): string {
-  const mcpServers: Record<string, unknown> = {};
-  for (const server of servers) {
-    mcpServers[server.key] = {
-      type: server.transport,
+/**
+ * Build the per-server entry for the JSON-based adapters (Claude/Cursor/
+ * Opencode/Gemini). The MCP spec defines `"type": "stdio" | "http" | "sse"`
+ * and per-transport fields. Claude Code's `.mcp.json` uses this same shape.
+ */
+function buildJsonServerEntry(server: ResolvedMcpServerEntry): Record<string, unknown> {
+  if (server.transport === "stdio") {
+    return {
+      type: "stdio",
       command: server.command,
       args: server.args,
       env: server.env,
     };
   }
+  if (server.transport === "streamable_http") {
+    return {
+      type: "http",
+      url: server.url,
+      headers: server.headers,
+    };
+  }
+  // sse
+  return {
+    type: "sse",
+    url: server.url,
+    headers: server.headers,
+  };
+}
+
+function buildClaudeConfig(servers: ResolvedMcpServerEntry[]): string {
+  const mcpServers: Record<string, unknown> = {};
+  for (const server of servers) mcpServers[server.key] = buildJsonServerEntry(server);
   return `${JSON.stringify({ mcpServers }, null, 2)}\n`;
 }
 
@@ -95,18 +146,33 @@ function buildCodexConfig(servers: ResolvedMcpServerEntry[]): string {
   const lines: string[] = [];
   for (const server of servers) {
     lines.push(`[mcp_servers.${server.key}]`);
-    lines.push(`command = "${escapeTomlString(server.command)}"`);
-    if (server.args.length > 0) {
-      const argList = server.args
-        .map((arg) => `"${escapeTomlString(arg)}"`)
-        .join(", ");
-      lines.push(`args = [${argList}]`);
-    }
-    const envKeys = Object.keys(server.env);
-    if (envKeys.length > 0) {
-      lines.push(`[mcp_servers.${server.key}.env]`);
-      for (const key of envKeys) {
-        lines.push(`${key} = "${escapeTomlString(server.env[key]!)}"`);
+    if (server.transport === "stdio") {
+      lines.push(`command = "${escapeTomlString(server.command)}"`);
+      if (server.args.length > 0) {
+        const argList = server.args
+          .map((arg) => `"${escapeTomlString(arg)}"`)
+          .join(", ");
+        lines.push(`args = [${argList}]`);
+      }
+      const envKeys = Object.keys(server.env);
+      if (envKeys.length > 0) {
+        lines.push(`[mcp_servers.${server.key}.env]`);
+        for (const key of envKeys) {
+          lines.push(`${key} = "${escapeTomlString(server.env[key]!)}"`);
+        }
+      }
+    } else {
+      // Codex CLI's HTTP MCP support: transport + url + headers table.
+      // If a Codex version lacks HTTP support, this section is silently ignored.
+      const transportTag = server.transport === "streamable_http" ? "http" : "sse";
+      lines.push(`transport = "${transportTag}"`);
+      lines.push(`url = "${escapeTomlString(server.url ?? "")}"`);
+      const headerKeys = Object.keys(server.headers);
+      if (headerKeys.length > 0) {
+        lines.push(`[mcp_servers.${server.key}.headers]`);
+        for (const key of headerKeys) {
+          lines.push(`${key} = "${escapeTomlString(server.headers[key]!)}"`);
+        }
       }
     }
     lines.push("");
@@ -260,13 +326,22 @@ export function buildCodexCliOverrideFlags(servers: ResolvedMcpServerEntry[]): s
   const out: string[] = [];
   for (const server of servers) {
     const base = `mcp_servers.${server.key}`;
-    out.push("-c", `${base}.command=${escapeTomlInlineValue(server.command)}`);
-    if (server.args.length > 0) {
-      const argList = server.args.map(escapeTomlInlineValue).join(", ");
-      out.push("-c", `${base}.args=[${argList}]`);
-    }
-    for (const [envKey, envValue] of Object.entries(server.env)) {
-      out.push("-c", `${base}.env.${envKey}=${escapeTomlInlineValue(envValue)}`);
+    if (server.transport === "stdio") {
+      out.push("-c", `${base}.command=${escapeTomlInlineValue(server.command)}`);
+      if (server.args.length > 0) {
+        const argList = server.args.map(escapeTomlInlineValue).join(", ");
+        out.push("-c", `${base}.args=[${argList}]`);
+      }
+      for (const [envKey, envValue] of Object.entries(server.env)) {
+        out.push("-c", `${base}.env.${envKey}=${escapeTomlInlineValue(envValue)}`);
+      }
+    } else {
+      const transportTag = server.transport === "streamable_http" ? "http" : "sse";
+      out.push("-c", `${base}.transport=${escapeTomlInlineValue(transportTag)}`);
+      out.push("-c", `${base}.url=${escapeTomlInlineValue(server.url ?? "")}`);
+      for (const [hKey, hValue] of Object.entries(server.headers)) {
+        out.push("-c", `${base}.headers.${hKey}=${escapeTomlInlineValue(hValue)}`);
+      }
     }
   }
   return out;

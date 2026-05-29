@@ -63,6 +63,7 @@ import { companySkillService } from "./company-skills.js";
 import { companyMcpServerService } from "./company-mcp-servers.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
+import { mcpOAuthService } from "./mcp-oauth.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import {
   buildHeartbeatRunIssueComment,
@@ -2366,6 +2367,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const companyMcpServers = companyMcpServerService(db);
+  const mcpOAuth = mcpOAuthService(db, {
+    secrets: secretsSvc,
+    publicBaseUrl: process.env.PAPERCLIP_AUTH_PUBLIC_BASE_URL
+      ?? process.env.PAPERCLIP_PUBLIC_URL
+      ?? null,
+  });
+  const mcpOAuthTokenResolver = (companyId: string, mcpServerId: string) =>
+    mcpOAuth.ensureValidAccessToken(companyId, mcpServerId);
   const issuesSvc = issueService(db);
   const treeControlSvc = issueTreeControlService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
@@ -7144,7 +7153,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const desiredMcpServerIds = readDesiredMcpServerIds(agent.runtimeConfig);
     const { resolved: paperclipResolvedMcpServers, warnings: mcpWarnings } =
       desiredMcpServerIds.length > 0
-        ? await companyMcpServers.resolveRuntimeConfigSafe(agent.companyId, desiredMcpServerIds)
+        ? await companyMcpServers.resolveRuntimeConfigSafe(agent.companyId, desiredMcpServerIds, {
+          oauthTokenResolver: mcpOAuthTokenResolver,
+        })
         : { resolved: [], warnings: [] };
     for (const warning of mcpWarnings) {
       process.stderr.write(`[paperclip] MCP server warning: ${warning}\n`);
