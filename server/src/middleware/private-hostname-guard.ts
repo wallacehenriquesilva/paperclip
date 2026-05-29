@@ -49,6 +49,22 @@ function blockedHostnameMessage(hostname: string): string {
   );
 }
 
+/**
+ * Routes that are explicitly designed to be called from the public internet
+ * (Slack/GitHub/generic webhooks). The hostname guard is meant to protect the
+ * board UI and authenticated API from DNS rebinding / private-IP probing —
+ * webhook endpoints have their own per-trigger signature verification and
+ * should always be reachable through whatever hostname the operator's tunnel
+ * uses, without requiring it on the allowlist.
+ */
+const PUBLIC_WEBHOOK_PATH_PREFIXES = [
+  "/api/routine-triggers/public/",
+];
+
+function isPublicWebhookPath(path: string): boolean {
+  return PUBLIC_WEBHOOK_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
 export function privateHostnameGuard(opts: {
   enabled: boolean;
   allowedHostnames: string[];
@@ -64,6 +80,11 @@ export function privateHostnameGuard(opts: {
   });
 
   return (req, res, next) => {
+    if (isPublicWebhookPath(req.path)) {
+      next();
+      return;
+    }
+
     const hostname = extractHostname(req);
     const wantsJson = req.path.startsWith("/api") || req.accepts(["json", "html", "text"]) === "json";
 

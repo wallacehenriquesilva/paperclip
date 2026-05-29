@@ -1570,6 +1570,35 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       }
     });
 
+    it("answers url_verification even when the routine is not active", async () => {
+      // Slack sends url_verification during initial app setup, before the
+      // operator activates the routine. Without this carve-out, the handshake
+      // returns 409 and the Slack app subscription cannot be saved.
+      const { trigger, routine, signingSecret, svc } = await createSlackTriggerFixture();
+      await db
+        .update(routines)
+        .set({ status: "draft" })
+        .where(eq(routines.id, routine.id));
+      await db
+        .update(routineTriggers)
+        .set({ enabled: false })
+        .where(eq(routineTriggers.id, trigger.id));
+
+      const envelope = { type: "url_verification", token: "tok", challenge: "setup-handshake" };
+      const body = JSON.stringify(envelope);
+      const ts = String(Math.floor(Date.now() / 1000));
+      const result = await svc.firePublicTrigger(trigger.publicId!, {
+        slackSignatureHeader: signSlackBody(signingSecret, ts, body),
+        slackTimestampHeader: ts,
+        rawBody: Buffer.from(body),
+        payload: envelope,
+      });
+      expect(result.kind).toBe("url_verification");
+      if (result.kind === "url_verification") {
+        expect(result.challenge).toBe("setup-handshake");
+      }
+    });
+
     it("rejects a tampered Slack signature with 401", async () => {
       const { trigger, svc } = await createSlackTriggerFixture();
       const envelope = buildAppMentionEnvelope();

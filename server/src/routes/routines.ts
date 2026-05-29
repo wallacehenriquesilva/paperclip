@@ -460,19 +460,32 @@ export function routineRoutes(
   });
 
   // Public webhook + Slack endpoints need raw-body access for signature
-  // verification. We capture raw bytes for ANY content-type on this route
-  // and parse JSON or url-encoded forms ourselves so the global
-  // express.json() (which only accepts application/json) does not
-  // pre-consume the body and so slash commands
-  // (application/x-www-form-urlencoded) work.
+  // verification across two content-types:
+  //   - application/json (Slack events incl. url_verification, generic
+  //     webhooks): pre-parsed by the global express.json() middleware, which
+  //     also captures the raw bytes via its `verify` hook onto req.rawBody.
+  //   - application/x-www-form-urlencoded (Slack slash commands): NOT parsed
+  //     by the global express.json(); we capture raw bytes here with
+  //     express.raw() and parse the form ourselves.
+  // Both paths converge on `rawBody` + `payload` shapes that the service can
+  // verify against and inspect.
   const publicTriggerRawBody = express.raw({ type: () => true, limit: "1mb" });
   router.post(
     "/routine-triggers/public/:publicId/fire",
     publicTriggerRawBody,
     async (req, res) => {
-      const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      // When the global express.json() already parsed the body, req.body is
+      // the parsed object and req.rawBody holds the raw bytes (captured by
+      // the verify hook in app.ts). When this route's express.raw() captured
+      // the body itself (form-encoded), req.body IS the Buffer.
+      const capturedRawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+      const rawBody = Buffer.isBuffer(req.body)
+        ? req.body
+        : (capturedRawBody ?? Buffer.alloc(0));
       const contentType = req.header("content-type") ?? "";
-      const payload = parsePublicTriggerBody(rawBody, contentType);
+      const payload = Buffer.isBuffer(req.body)
+        ? parsePublicTriggerBody(rawBody, contentType)
+        : ((req.body as Record<string, unknown> | null | undefined) ?? null);
       const result = await svc.firePublicTrigger(req.params.publicId as string, {
         authorizationHeader: req.header("authorization"),
         signatureHeader: req.header("x-paperclip-signature"),
