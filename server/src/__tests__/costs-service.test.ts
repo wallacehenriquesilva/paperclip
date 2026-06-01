@@ -82,6 +82,36 @@ const mockCostService = vi.hoisted(() => ({
     runCount: 0,
     runtimeMs: 0,
   }),
+  issueCostBreakdown: vi.fn().mockResolvedValue({
+    issueId: "issue-1",
+    self: {
+      issueCount: 1,
+      costCents: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      runCount: 0,
+      runtimeMs: 0,
+    },
+    subtree: {
+      issueCount: 0,
+      costCents: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      runCount: 0,
+      runtimeMs: 0,
+    },
+    total: {
+      issueCount: 1,
+      costCents: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      runCount: 0,
+      runtimeMs: 0,
+    },
+  }),
   windowSpend: vi.fn().mockResolvedValue([]),
   byProject: vi.fn().mockResolvedValue([]),
 }));
@@ -256,6 +286,21 @@ describe("cost routes", () => {
       outputTokens: 0,
       runCount: 0,
       runtimeMs: 0,
+    });
+  });
+
+  it("returns issue cost breakdown with self / subtree / total buckets", async () => {
+    const app = await createApp();
+    const res = await request(app).get("/api/issues/pc1a2-1/cost-breakdown");
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.getByIdentifier).toHaveBeenCalledWith("PC1A2-1");
+    expect(mockCostService.issueCostBreakdown).toHaveBeenCalledWith("company-1", "issue-1");
+    expect(res.body).toMatchObject({
+      issueId: "issue-1",
+      self: expect.any(Object),
+      subtree: expect.any(Object),
+      total: expect.any(Object),
     });
   });
 
@@ -795,6 +840,278 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     // 120s + 30s = 150s + ~5s live run
     expect(descendantsOnly.runtimeMs).toBeGreaterThanOrEqual(150_000 + 4_000);
     expect(descendantsOnly.runtimeMs).toBeLessThan(150_000 + 60_000);
+  });
+
+  it("issueCostBreakdown rolls up tokens and cost from heartbeat_runs.usage_json across the tree", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const rootIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    const grandchildIssueId = randomUUID();
+    const siblingIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Cost Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      {
+        id: rootIssueId,
+        companyId,
+        title: "Root",
+        status: "in_progress",
+        priority: "medium",
+        issueNumber: 1,
+        identifier: "TST-1",
+      },
+      {
+        id: childIssueId,
+        companyId,
+        parentId: rootIssueId,
+        title: "Child",
+        status: "done",
+        priority: "medium",
+        issueNumber: 2,
+        identifier: "TST-2",
+      },
+      {
+        id: grandchildIssueId,
+        companyId,
+        parentId: childIssueId,
+        title: "Grandchild",
+        status: "done",
+        priority: "medium",
+        issueNumber: 3,
+        identifier: "TST-3",
+      },
+      {
+        id: siblingIssueId,
+        companyId,
+        title: "Sibling",
+        status: "done",
+        priority: "medium",
+        issueNumber: 4,
+        identifier: "TST-4",
+      },
+    ]);
+
+    // Three runs on root, plus runs on child / grandchild / sibling.
+    // Numbers chosen so each bucket sums to a distinct round value:
+    // self    -> 1.00 USD,  100k input, 20k output
+    // subtree -> 5.00 USD,  500k input, 100k output (child + grandchild)
+    // sibling -> 4.00 USD (must NOT leak in)
+    const root1 = randomUUID();
+    const root2 = randomUUID();
+    const childRun = randomUUID();
+    const grandchildRun = randomUUID();
+    const siblingRun = randomUUID();
+
+    await db.insert(heartbeatRuns).values([
+      {
+        id: root1,
+        companyId,
+        agentId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:00:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:00:30.000Z"),
+        contextSnapshot: { issueId: rootIssueId },
+        usageJson: { inputTokens: 60_000, outputTokens: 12_000, cachedInputTokens: 1_000, costUsd: 0.6 },
+      },
+      {
+        id: root2,
+        companyId,
+        agentId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:01:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:01:30.000Z"),
+        contextSnapshot: { issueId: rootIssueId },
+        usageJson: { input_tokens: 40_000, output_tokens: 8_000, cache_read_input_tokens: 500, total_cost_usd: 0.4 },
+      },
+      {
+        id: childRun,
+        companyId,
+        agentId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:02:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:02:45.000Z"),
+        contextSnapshot: { issueId: childIssueId },
+        usageJson: { inputTokens: 300_000, outputTokens: 60_000, costUsd: 3.0 },
+      },
+      {
+        id: grandchildRun,
+        companyId,
+        agentId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:03:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:03:20.000Z"),
+        contextSnapshot: { issueId: grandchildIssueId },
+        usageJson: { inputTokens: 200_000, outputTokens: 40_000, costUsd: 2.0 },
+      },
+      {
+        id: siblingRun,
+        companyId,
+        agentId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:04:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:04:30.000Z"),
+        contextSnapshot: { issueId: siblingIssueId },
+        usageJson: { inputTokens: 400_000, outputTokens: 80_000, costUsd: 4.0 },
+      },
+    ]);
+
+    const breakdown = await costs.issueCostBreakdown(companyId, rootIssueId);
+
+    expect(breakdown.issueId).toBe(rootIssueId);
+
+    // self: 2 runs on root
+    expect(breakdown.self.runCount).toBe(2);
+    expect(breakdown.self.inputTokens).toBe(100_000);
+    expect(breakdown.self.outputTokens).toBe(20_000);
+    expect(breakdown.self.cachedInputTokens).toBe(1_500);
+    expect(breakdown.self.costCents).toBe(100); // $1.00
+    expect(breakdown.self.issueCount).toBe(1);
+
+    // subtree: child + grandchild (NOT sibling)
+    expect(breakdown.subtree.runCount).toBe(2);
+    expect(breakdown.subtree.inputTokens).toBe(500_000);
+    expect(breakdown.subtree.outputTokens).toBe(100_000);
+    expect(breakdown.subtree.costCents).toBe(500); // $5.00
+    expect(breakdown.subtree.issueCount).toBe(2);
+
+    // total: self + subtree
+    expect(breakdown.total.runCount).toBe(4);
+    expect(breakdown.total.inputTokens).toBe(600_000);
+    expect(breakdown.total.outputTokens).toBe(120_000);
+    expect(breakdown.total.costCents).toBe(600); // $6.00
+    expect(breakdown.total.issueCount).toBe(3);
+  });
+
+  it("issueCostBreakdown attributes activity_log-linked runs to the root issue", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const rootIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    const externalRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Activity Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      {
+        id: rootIssueId,
+        companyId,
+        title: "Root",
+        status: "in_progress",
+        priority: "medium",
+        issueNumber: 1,
+        identifier: "ACT-1",
+      },
+      {
+        id: childIssueId,
+        companyId,
+        parentId: rootIssueId,
+        title: "Child",
+        status: "done",
+        priority: "medium",
+        issueNumber: 2,
+        identifier: "ACT-2",
+      },
+    ]);
+
+    // Run was checked out for a different (unrelated) issue but its
+    // activity_log entry shows it touched the root issue. The badge should
+    // still pick it up and place it in the "self" bucket.
+    await db.insert(heartbeatRuns).values({
+      id: externalRunId,
+      companyId,
+      agentId,
+      invocationSource: "on_demand",
+      status: "completed",
+      startedAt: new Date("2026-04-10T00:00:00.000Z"),
+      finishedAt: new Date("2026-04-10T00:00:10.000Z"),
+      contextSnapshot: { issueId: null },
+      usageJson: { inputTokens: 7, outputTokens: 3, costUsd: 0.01 },
+    });
+    await db.insert(activityLog).values({
+      companyId,
+      runId: externalRunId,
+      actorType: "agent",
+      actorId: agentId,
+      agentId,
+      action: "issue.commented",
+      entityType: "issue",
+      entityId: rootIssueId,
+      details: {},
+    });
+
+    const breakdown = await costs.issueCostBreakdown(companyId, rootIssueId);
+    expect(breakdown.self.runCount).toBe(1);
+    expect(breakdown.self.inputTokens).toBe(7);
+    expect(breakdown.self.outputTokens).toBe(3);
+    expect(breakdown.self.costCents).toBe(1);
+    expect(breakdown.subtree.runCount).toBe(0);
+  });
+
+  it("issueCostBreakdown returns zeroed buckets when the issue has no runs", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: rootIssueId,
+      companyId,
+      title: "Lonely",
+      status: "todo",
+      priority: "medium",
+      issueNumber: 1,
+      identifier: "EMPTY-1",
+    });
+
+    const breakdown = await costs.issueCostBreakdown(companyId, rootIssueId);
+    expect(breakdown.self.costCents).toBe(0);
+    expect(breakdown.self.runCount).toBe(0);
+    expect(breakdown.subtree.costCents).toBe(0);
+    expect(breakdown.total.costCents).toBe(0);
+    // Root itself still counts as 1 issue in the total bucket.
+    expect(breakdown.total.issueCount).toBe(1);
+    expect(breakdown.subtree.issueCount).toBe(0);
   });
 
   it("aggregates finance event sums above int32 without raising Postgres integer overflow", async () => {

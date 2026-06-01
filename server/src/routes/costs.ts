@@ -150,6 +150,18 @@ export function costRoutes(
     res.json(summary);
   });
 
+  router.get("/issues/:id/cost-breakdown", async (req, res) => {
+    const rawId = req.params.id as string;
+    const issue = await resolveIssueByRef(rawId);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    const breakdown = await costs.issueCostBreakdown(issue.companyId, issue.id);
+    res.json(breakdown);
+  });
+
   router.get("/companies/:companyId/costs/by-agent", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);

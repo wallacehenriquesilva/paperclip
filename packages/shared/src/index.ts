@@ -494,6 +494,8 @@ export type {
   CostEvent,
   CostSummary,
   IssueCostSummary,
+  IssueCostBucket,
+  IssueCostBreakdown,
   CostByAgent,
   CostByProviderModel,
   CostByBiller,

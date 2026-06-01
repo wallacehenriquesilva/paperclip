@@ -8,6 +8,7 @@ import type {
   FeedbackVote,
   Issue,
   IssueAttachment,
+  IssueCostBreakdown,
   IssueCostSummary,
   IssueComment,
   IssueDocument,
@@ -222,6 +223,8 @@ export const issuesApi = {
     const qs = options.excludeRoot ? "?excludeRoot=true" : "";
     return api.get<IssueCostSummary>(`/issues/${id}/cost-summary${qs}`);
   },
+  getCostBreakdown: (id: string) =>
+    api.get<IssueCostBreakdown>(`/issues/${id}/cost-breakdown`),
   listFeedbackTraces: (id: string, filters?: Record<string, string | boolean | undefined>) => {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(filters ?? {})) {
