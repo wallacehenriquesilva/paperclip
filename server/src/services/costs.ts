@@ -50,7 +50,7 @@ async function getMonthlySpendTotal(
 
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   const budgets = budgetService(db, budgetHooks);
-  return {
+  const service = {
     createEvent: async (companyId: string, data: Omit<typeof costEvents.$inferInsert, "companyId">) => {
       const agent = await db
         .select()
@@ -267,6 +267,214 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         outputTokens: Number(costRow?.outputTokens ?? 0),
         runCount: Number(runRow?.runCount ?? 0),
         runtimeMs: Number(runRow?.runtimeMs ?? 0),
+      };
+    },
+
+    issueCostBreakdown: async (companyId: string, issueId: string) => {
+      // Source-of-truth for the badge: heartbeat_runs.usage_json — the SAME data
+      // the per-run UI shows. cost_events would be ideal in theory but it can be
+      // sparsely populated (missing issueId on legacy rows, subscription runs
+      // skipping insert, etc.), so the rollup ended up showing zero even when
+      // the operator could clearly see tokens on the run page. Reading from the
+      // run rows directly keeps the badge numbers consistent with the run page.
+
+      const childIssues = alias(issues, "child");
+
+      // Discover descendant ids for the "subtree" issueCount field. We can't
+      // compute this from heartbeat_runs alone because an issue can exist
+      // without ever having had a run executed for it.
+      const descendantRows = await db.execute(sql`
+        WITH RECURSIVE issue_tree(id) AS (
+          SELECT (${issues.id})::text AS id
+          FROM ${issues}
+          WHERE ${issues.companyId} = ${companyId}
+            AND ${issues.parentId} = ${issueId}
+            AND ${issues.hiddenAt} IS NULL
+          UNION ALL
+          SELECT (${childIssues.id})::text
+          FROM ${issues} ${childIssues}
+          JOIN issue_tree ON (${childIssues.parentId})::text = issue_tree.id
+          WHERE ${childIssues.companyId} = ${companyId}
+            AND ${childIssues.hiddenAt} IS NULL
+        )
+        SELECT id FROM issue_tree
+      `);
+      const descendantIds = new Set<string>(
+        (Array.isArray(descendantRows) ? descendantRows : []).map(
+          (row: { id?: string | null }) => String(row?.id ?? ""),
+        ).filter(Boolean),
+      );
+
+      // Aggregate per-run usage in one SQL pass and bucketize each run into
+      // self vs subtree based on contextSnapshot.issueId. activity_log linkage
+      // is only used to *discover* relevant runs; a run with contextSnapshot
+      // missing the issue but linked via activity_log to the root lands in
+      // "self". Each run is counted exactly once.
+      const rows = await db.execute(sql`
+        WITH RECURSIVE issue_tree(id, is_root) AS (
+          SELECT (${issues.id})::text AS id, true AS is_root
+          FROM ${issues}
+          WHERE ${issues.companyId} = ${companyId}
+            AND ${issues.id} = ${issueId}
+            AND ${issues.hiddenAt} IS NULL
+          UNION ALL
+          SELECT (${childIssues.id})::text, false
+          FROM ${issues} ${childIssues}
+          JOIN issue_tree ON (${childIssues.parentId})::text = issue_tree.id
+          WHERE ${childIssues.companyId} = ${companyId}
+            AND ${childIssues.hiddenAt} IS NULL
+        ),
+        linked_runs AS (
+          SELECT
+            ${heartbeatRuns.id} AS run_id,
+            ${heartbeatRuns.usageJson} AS usage_json,
+            ${heartbeatRuns.resultJson} AS result_json,
+            ${heartbeatRuns.startedAt} AS started_at,
+            ${heartbeatRuns.finishedAt} AS finished_at,
+            (${heartbeatRuns.contextSnapshot} ->> 'issueId') AS ctx_issue_id,
+            EXISTS (
+              SELECT 1
+              FROM ${activityLog}
+              WHERE ${activityLog.companyId} = ${companyId}
+                AND ${activityLog.entityType} = 'issue'
+                AND ${activityLog.entityId}::text = ${issueId}
+                AND ${activityLog.runId} = ${heartbeatRuns.id}
+            ) AS activity_touched_root
+          FROM ${heartbeatRuns}
+          WHERE ${heartbeatRuns.companyId} = ${companyId}
+            AND ${heartbeatRuns.startedAt} IS NOT NULL
+            AND (
+              (${heartbeatRuns.contextSnapshot} ->> 'issueId') IN (SELECT id FROM issue_tree)
+              OR EXISTS (
+                SELECT 1
+                FROM ${activityLog}
+                JOIN issue_tree ON ${activityLog.entityId}::text = issue_tree.id
+                WHERE ${activityLog.companyId} = ${companyId}
+                  AND ${activityLog.entityType} = 'issue'
+                  AND ${activityLog.runId} = ${heartbeatRuns.id}
+              )
+            )
+        ),
+        bucketed_runs AS (
+          SELECT
+            run_id,
+            usage_json,
+            result_json,
+            started_at,
+            finished_at,
+            CASE
+              WHEN ctx_issue_id = ${issueId} THEN 'self'
+              WHEN ctx_issue_id IN (SELECT id FROM issue_tree WHERE NOT is_root) THEN 'subtree'
+              WHEN activity_touched_root THEN 'self'
+              ELSE 'subtree'
+            END AS bucket
+          FROM linked_runs
+        ),
+        run_usage AS (
+          SELECT
+            bucket,
+            run_id,
+            coalesce(
+              (usage_json ->> 'inputTokens')::bigint,
+              (usage_json ->> 'input_tokens')::bigint,
+              0
+            ) AS input_tokens,
+            coalesce(
+              (usage_json ->> 'outputTokens')::bigint,
+              (usage_json ->> 'output_tokens')::bigint,
+              0
+            ) AS output_tokens,
+            coalesce(
+              (usage_json ->> 'cachedInputTokens')::bigint,
+              (usage_json ->> 'cached_input_tokens')::bigint,
+              (usage_json ->> 'cache_read_input_tokens')::bigint,
+              0
+            ) AS cached_input_tokens,
+            coalesce(
+              (usage_json ->> 'costUsd')::double precision,
+              (usage_json ->> 'cost_usd')::double precision,
+              (usage_json ->> 'total_cost_usd')::double precision,
+              (result_json ->> 'costUsd')::double precision,
+              (result_json ->> 'cost_usd')::double precision,
+              (result_json ->> 'total_cost_usd')::double precision,
+              0
+            ) AS cost_usd,
+            CASE
+              WHEN started_at IS NULL THEN 0
+              ELSE extract(epoch from (coalesce(finished_at, now()) - started_at)) * 1000
+            END AS runtime_ms
+          FROM bucketed_runs
+        )
+        SELECT
+          bucket,
+          count(*)::int AS run_count,
+          coalesce(sum(input_tokens), 0)::double precision AS input_tokens,
+          coalesce(sum(output_tokens), 0)::double precision AS output_tokens,
+          coalesce(sum(cached_input_tokens), 0)::double precision AS cached_input_tokens,
+          coalesce(sum(cost_usd), 0)::double precision AS cost_usd,
+          coalesce(sum(runtime_ms), 0)::double precision AS runtime_ms
+        FROM run_usage
+        GROUP BY bucket
+      `);
+
+      type RowShape = {
+        bucket?: string | null;
+        run_count?: number | string | null;
+        input_tokens?: number | string | null;
+        output_tokens?: number | string | null;
+        cached_input_tokens?: number | string | null;
+        cost_usd?: number | string | null;
+        runtime_ms?: number | string | null;
+      };
+
+      const emptyBucket = () => ({
+        issueCount: 0,
+        costCents: 0,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        runCount: 0,
+        runtimeMs: 0,
+      });
+
+      const selfBucket = emptyBucket();
+      const subtreeBucket = emptyBucket();
+
+      const aggregate = (target: ReturnType<typeof emptyBucket>, row: RowShape) => {
+        const usd = Number(row.cost_usd ?? 0);
+        target.runCount += Number(row.run_count ?? 0);
+        target.inputTokens += Number(row.input_tokens ?? 0);
+        target.outputTokens += Number(row.output_tokens ?? 0);
+        target.cachedInputTokens += Number(row.cached_input_tokens ?? 0);
+        target.costCents += Math.round(usd * 100);
+        target.runtimeMs += Number(row.runtime_ms ?? 0);
+      };
+
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const typed = row as RowShape;
+        if (typed.bucket === "self") aggregate(selfBucket, typed);
+        else if (typed.bucket === "subtree") aggregate(subtreeBucket, typed);
+      }
+
+      // issueCount comes from the tree topology, independent of run activity.
+      selfBucket.issueCount = 1;
+      subtreeBucket.issueCount = descendantIds.size;
+
+      const total = {
+        issueCount: selfBucket.issueCount + subtreeBucket.issueCount,
+        costCents: selfBucket.costCents + subtreeBucket.costCents,
+        inputTokens: selfBucket.inputTokens + subtreeBucket.inputTokens,
+        cachedInputTokens: selfBucket.cachedInputTokens + subtreeBucket.cachedInputTokens,
+        outputTokens: selfBucket.outputTokens + subtreeBucket.outputTokens,
+        runCount: selfBucket.runCount + subtreeBucket.runCount,
+        runtimeMs: selfBucket.runtimeMs + subtreeBucket.runtimeMs,
+      };
+
+      return {
+        issueId,
+        self: selfBucket,
+        subtree: subtreeBucket,
+        total,
       };
     },
 
@@ -501,4 +709,5 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .orderBy(desc(costCentsExpr));
     },
   };
+  return service;
 }

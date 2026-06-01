@@ -43,6 +43,34 @@ export interface IssueCostSummary {
   runtimeMs: number;
 }
 
+/** Single bucket of usage attributed to a fixed set of issues. */
+export interface IssueCostBucket {
+  issueCount: number;
+  costCents: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  runCount: number;
+  runtimeMs: number;
+}
+
+/**
+ * Rolled-up cost/token usage for a parent issue, split three ways so the UI
+ * can show "this task vs sub-tasks vs total" without recomputing on the client.
+ *
+ * - self:    cost_events attributed directly to issueId (no descendants).
+ * - subtree: cost_events attributed to any descendant of issueId (transitive).
+ * - total:   self + subtree, returned for convenience.
+ *
+ * "Descendants" follows issues.parent_id transitively; hidden issues are excluded.
+ */
+export interface IssueCostBreakdown {
+  issueId: string;
+  self: IssueCostBucket;
+  subtree: IssueCostBucket;
+  total: IssueCostBucket;
+}
+
 export interface CostByAgent {
   agentId: string;
   agentName: string | null;
