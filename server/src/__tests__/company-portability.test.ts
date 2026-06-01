@@ -3267,4 +3267,310 @@ describe("company portability", () => {
       expect(preview.warnings.some((w) => /broken/.test(w) && /command/.test(w))).toBe(true);
     });
   });
+
+  describe("import preservation", () => {
+    it("preserves existing agent env when replace-importing a package without env", async () => {
+      const portability = companyPortabilityService({} as any);
+      const exported = await portability.exportBundle("company-1", {
+        include: {
+          company: false,
+          agents: true,
+          projects: false,
+          issues: false,
+        },
+      });
+
+      agentSvc.update.mockImplementation(async (id: string, patch: Record<string, unknown>) => ({
+        id,
+        name: "ClaudeCoder",
+        adapterType: patch.adapterType,
+        adapterConfig: patch.adapterConfig,
+        runtimeConfig: patch.runtimeConfig,
+      }));
+
+      await portability.importBundle({
+        source: {
+          type: "inline",
+          rootPath: exported.rootPath,
+          files: exported.files,
+        },
+        include: {
+          company: false,
+          agents: true,
+          projects: false,
+          issues: false,
+        },
+        target: {
+          mode: "existing_company",
+          companyId: "company-1",
+        },
+        agents: ["claudecoder"],
+        collisionStrategy: "replace",
+      }, "user-1");
+
+      expect(agentSvc.update).toHaveBeenCalledWith("agent-1", expect.objectContaining({
+        adapterConfig: expect.objectContaining({
+          env: expect.objectContaining({
+            GH_TOKEN: expect.objectContaining({
+              type: "secret_ref",
+              secretId: "secret-2",
+            }),
+          }),
+        }),
+      }));
+    });
+
+    it("exports desired MCP server keys instead of database ids", async () => {
+      const portability = companyPortabilityService({} as any);
+
+      agentSvc.list.mockResolvedValue([
+        {
+          id: "agent-1",
+          name: "ClaudeCoder",
+          status: "idle",
+          role: "engineer",
+          title: "Software Engineer",
+          icon: "code",
+          reportsTo: null,
+          capabilities: "Writes code",
+          adapterType: "claude_local",
+          adapterConfig: {
+            model: "claude-opus-4-6",
+          },
+          runtimeConfig: {
+            desiredMcpServers: ["mcp-1"],
+            heartbeat: { intervalSec: 3600 },
+          },
+          budgetMonthlyCents: 0,
+          permissions: {},
+          metadata: null,
+        },
+      ]);
+      companyMcpServerSvc.list.mockResolvedValue([
+        { id: "mcp-1", key: "filesystem", name: "Filesystem" },
+      ]);
+      companyMcpServerSvc.getById.mockResolvedValue({
+        id: "mcp-1",
+        key: "filesystem",
+        name: "Filesystem",
+        description: null,
+        transport: "stdio",
+        command: "npx",
+        args: [],
+        envTemplate: {},
+        enabled: true,
+        metadata: null,
+      });
+
+      const exported = await portability.exportBundle("company-1", {
+        include: {
+          company: false,
+          agents: true,
+          projects: false,
+          issues: false,
+          mcpServers: true,
+        },
+      });
+
+      const extension = asTextFile(exported.files[".paperclip.yaml"]);
+      expect(extension).toContain('desiredMcpServerKeys:');
+      expect(extension).toContain('"filesystem"');
+      expect(extension).not.toContain("mcp-1");
+    });
+
+    it("remaps desired MCP servers and preserves MCP env on replace import", async () => {
+      const portability = companyPortabilityService({} as any);
+
+      agentSvc.list.mockResolvedValue([
+        {
+          id: "agent-1",
+          name: "ClaudeCoder",
+          status: "idle",
+          role: "engineer",
+          title: "Software Engineer",
+          icon: "code",
+          reportsTo: null,
+          capabilities: "Writes code",
+          adapterType: "claude_local",
+          adapterConfig: { model: "claude-opus-4-6" },
+          runtimeConfig: {
+            desiredMcpServers: ["mcp-old"],
+            heartbeat: { intervalSec: 3600 },
+          },
+          budgetMonthlyCents: 0,
+          permissions: {},
+          metadata: null,
+        },
+      ]);
+      companyMcpServerSvc.list.mockResolvedValue([
+        { id: "mcp-old", key: "filesystem", name: "Filesystem" },
+      ]);
+      companyMcpServerSvc.getByKey.mockResolvedValue({
+        id: "mcp-old",
+        key: "filesystem",
+        name: "Filesystem",
+        description: null,
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "old"],
+        envTemplate: { LOG_LEVEL: "debug" },
+        enabled: true,
+        metadata: null,
+      });
+      companyMcpServerSvc.delete.mockResolvedValue({
+        id: "mcp-old",
+        key: "filesystem",
+      });
+      companyMcpServerSvc.create.mockResolvedValue({
+        id: "mcp-new",
+        key: "filesystem",
+        name: "Filesystem",
+        description: null,
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "new"],
+        envTemplate: { LOG_LEVEL: "debug" },
+        enabled: true,
+        metadata: null,
+      });
+      agentSvc.update.mockImplementation(async (id: string, patch: Record<string, unknown>) => ({
+        id,
+        name: "ClaudeCoder",
+        adapterType: patch.adapterType,
+        adapterConfig: patch.adapterConfig,
+        runtimeConfig: patch.runtimeConfig,
+      }));
+
+      const files = {
+        "COMPANY.md": "---\nname: Imported Co\n---\n",
+        ".paperclip.yaml": [
+          'schema: "paperclip/v1"',
+          "agents:",
+          "  claudecoder:",
+          "    adapter:",
+          '      type: "claude_local"',
+          "      config:",
+          '        model: "claude-opus-4-6"',
+          "    runtime:",
+          "      desiredMcpServerKeys:",
+          '        - "filesystem"',
+        ].join("\n"),
+        "agents/claudecoder/AGENTS.md": "---\nname: ClaudeCoder\n---\n\nYou write code.\n",
+        "mcp-servers/filesystem/MCP.md": [
+          "---",
+          'key: "filesystem"',
+          'name: "Filesystem"',
+          'command: "npx"',
+          "args:",
+          '  - "-y"',
+          '  - "new"',
+          "---",
+          "",
+        ].join("\n"),
+      };
+
+      await portability.importBundle({
+        source: { type: "inline", rootPath: "imported", files },
+        include: {
+          company: false,
+          agents: true,
+          projects: false,
+          issues: false,
+          mcpServers: true,
+        },
+        target: { mode: "existing_company", companyId: "company-1" },
+        agents: ["claudecoder"],
+        collisionStrategy: "replace",
+      }, "user-1");
+
+      expect(companyMcpServerSvc.create).toHaveBeenCalledWith("company-1", expect.objectContaining({
+        key: "filesystem",
+        env: { LOG_LEVEL: { kind: "literal", value: "debug" } },
+      }));
+      expect(agentSvc.update).toHaveBeenCalledWith("agent-1", expect.objectContaining({
+        runtimeConfig: expect.objectContaining({
+          desiredMcpServers: ["mcp-new"],
+        }),
+      }));
+    });
+
+    it("resolves desired MCP server keys when replace-import creates a new agent", async () => {
+      const portability = companyPortabilityService({} as any);
+
+      agentSvc.list.mockResolvedValue([]);
+      companyMcpServerSvc.list.mockResolvedValue([
+        { id: "mcp-new", key: "filesystem", name: "Filesystem" },
+      ]);
+      companyMcpServerSvc.getByKey.mockResolvedValue(null);
+      companyMcpServerSvc.create.mockResolvedValue({
+        id: "mcp-new",
+        key: "filesystem",
+        name: "Filesystem",
+        description: null,
+        transport: "stdio",
+        command: "npx",
+        args: [],
+        envTemplate: {},
+        enabled: true,
+        metadata: null,
+      });
+      agentSvc.create.mockResolvedValue({
+        id: "agent-created",
+        name: "ClaudeCoder",
+        adapterConfig: {},
+        runtimeConfig: {},
+      });
+      agentSvc.update.mockImplementation(async (id: string, patch: Record<string, unknown>) => ({
+        id,
+        name: "ClaudeCoder",
+        adapterConfig: patch.adapterConfig ?? {},
+        runtimeConfig: patch.runtimeConfig ?? {},
+      }));
+
+      const files = {
+        "COMPANY.md": "---\nname: Imported Co\n---\n",
+        ".paperclip.yaml": [
+          'schema: "paperclip/v1"',
+          "agents:",
+          "  claudecoder:",
+          "    adapter:",
+          '      type: "claude_local"',
+          "    runtime:",
+          "      desiredMcpServerKeys:",
+          '        - "filesystem"',
+        ].join("\n"),
+        "agents/claudecoder/AGENTS.md": "---\nname: ClaudeCoder\n---\n\nYou write code.\n",
+        "mcp-servers/filesystem/MCP.md": [
+          "---",
+          'key: "filesystem"',
+          'name: "Filesystem"',
+          'command: "npx"',
+          "args: []",
+          "---",
+          "",
+        ].join("\n"),
+      };
+
+      await portability.importBundle({
+        source: { type: "inline", rootPath: "imported", files },
+        include: {
+          company: false,
+          agents: true,
+          projects: false,
+          issues: false,
+          mcpServers: true,
+        },
+        target: { mode: "new_company", newCompanyName: "Imported Co" },
+        agents: ["claudecoder"],
+        collisionStrategy: "rename",
+      }, "user-1");
+
+      expect(agentSvc.create).toHaveBeenCalledWith("company-imported", expect.objectContaining({
+        runtimeConfig: expect.objectContaining({
+          desiredMcpServers: ["mcp-new"],
+        }),
+      }));
+      expect(agentSvc.create.mock.calls[0]?.[1]?.runtimeConfig).not.toHaveProperty("desiredMcpServerKeys");
+    });
+  });
 });

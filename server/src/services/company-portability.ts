@@ -73,6 +73,7 @@ import { validateCron } from "./cron.js";
 import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
 import { routineService } from "./routines.js";
+import { readDesiredMcpServerIds } from "./heartbeat.js";
 import { secretService } from "./secrets.js";
 
 /** Build OrgNode tree from manifest agent list (slug + reportsToSlug). */
@@ -858,6 +859,136 @@ function disableImportedTimerHeartbeat(runtimeConfig: unknown) {
   }
   next.heartbeat = heartbeat;
   return next;
+}
+
+const PRESERVED_ADAPTER_CONFIG_KEYS = ["env", "headers"] as const;
+
+type McpImportEnvValue = { kind: "literal"; value: string } | { kind: "secret"; secretKey: string };
+
+function readDesiredMcpServerKeys(runtimeConfig: unknown): string[] {
+  if (!isPlainRecord(runtimeConfig)) return [];
+  return readStringArray(runtimeConfig.desiredMcpServerKeys) ?? [];
+}
+
+function mergePreservedImportAdapterConfig(
+  existing: Record<string, unknown>,
+  imported: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = { ...imported };
+  for (const key of PRESERVED_ADAPTER_CONFIG_KEYS) {
+    const existingValue = existing[key];
+    const importedValue = imported[key];
+    const existingRecord = isPlainRecord(existingValue) ? existingValue : null;
+    const importedRecord = isPlainRecord(importedValue) ? importedValue : null;
+    if (!existingRecord || Object.keys(existingRecord).length === 0) continue;
+    if (!importedRecord || Object.keys(importedRecord).length === 0) {
+      merged[key] = existingRecord;
+      continue;
+    }
+    merged[key] = { ...existingRecord, ...importedRecord };
+  }
+  return merged;
+}
+
+function mergePreservedImportProjectEnv(
+  existing: AgentEnvConfig | null | undefined,
+  imported: AgentEnvConfig | null | undefined,
+): AgentEnvConfig | null {
+  if (!existing || Object.keys(existing).length === 0) return imported ?? null;
+  if (!imported || Object.keys(imported).length === 0) return existing;
+  return { ...existing, ...imported };
+}
+
+function mergeMcpEnvTemplates(
+  preserved: Record<string, string>,
+  imported: Record<string, string>,
+): Record<string, string> {
+  return { ...preserved, ...imported };
+}
+
+function remapDesiredMcpServerIds(ids: string[], mcpIdRemap: Map<string, string>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    const remapped = mcpIdRemap.get(id) ?? id;
+    if (seen.has(remapped)) continue;
+    seen.add(remapped);
+    out.push(remapped);
+  }
+  return out;
+}
+
+function resolveImportedAgentRuntimeConfig(
+  existingRuntime: unknown,
+  importedRuntime: unknown,
+  mcpKeyToId: Map<string, string>,
+  mcpIdRemap: Map<string, string>,
+  options?: { inheritExistingMcp?: boolean },
+): Record<string, unknown> {
+  const next = disableImportedTimerHeartbeat(importedRuntime);
+  const keys = readDesiredMcpServerKeys(next);
+  const hasExplicitKeys = hasOwn(next, "desiredMcpServerKeys");
+  const resolvedFromKeys = keys.flatMap((key) => {
+    const id = mcpKeyToId.get(key);
+    return id ? [id] : [];
+  });
+
+  let desiredIds: string[];
+  if (keys.length > 0) {
+    desiredIds = resolvedFromKeys;
+  } else {
+    const importedIds = readDesiredMcpServerIds(next);
+    if (importedIds.length > 0) {
+      desiredIds = remapDesiredMcpServerIds(importedIds, mcpIdRemap);
+    } else if (options?.inheritExistingMcp) {
+      desiredIds = remapDesiredMcpServerIds(readDesiredMcpServerIds(existingRuntime), mcpIdRemap);
+    } else {
+      desiredIds = [];
+    }
+  }
+
+  delete next.desiredMcpServerKeys;
+  if (desiredIds.length > 0) {
+    next.desiredMcpServers = desiredIds;
+  } else if (hasOwn(next, "desiredMcpServers") || hasExplicitKeys) {
+    delete next.desiredMcpServers;
+  }
+  return next;
+}
+
+async function buildMcpImportEnvInput(
+  db: Db,
+  companyId: string,
+  mcpKey: string,
+  envTemplate: Record<string, string>,
+  warnings: string[],
+): Promise<Record<string, McpImportEnvValue>> {
+  const envInput: Record<string, McpImportEnvValue> = {};
+  for (const [envKey, raw] of Object.entries(envTemplate)) {
+    const match = raw.match(/^\$\{secret:([a-z0-9][a-z0-9_-]*)\}$/);
+    if (match) {
+      const secretKey = match[1]!;
+      const existingSecret = await db
+        .select({ id: companySecrets.id })
+        .from(companySecrets)
+        .where(and(
+          eq(companySecrets.companyId, companyId),
+          eq(companySecrets.key, secretKey),
+          ne(companySecrets.status, "deleted"),
+        ))
+        .then((rows) => rows[0] ?? null);
+      if (existingSecret) {
+        envInput[envKey] = { kind: "secret", secretKey };
+      } else {
+        warnings.push(
+          `MCP server "${mcpKey}" env ${envKey} references missing secret "${secretKey}" in target company — dropping the env entry. Recreate the secret and edit the MCP server to re-link it.`,
+        );
+      }
+      continue;
+    }
+    envInput[envKey] = { kind: "literal", value: raw };
+  }
+  return envInput;
 }
 
 function normalizePortableProjectWorkspaceExtension(
@@ -3398,8 +3529,10 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       }
     }
 
+    let mcpIdToKey = new Map<string, string>();
     if (include.mcpServers || include.agents) {
       const mcpRows = await companyMcpServers.list(companyId);
+      mcpIdToKey = new Map(mcpRows.map((row) => [row.id, row.key]));
       const mcpSelector = new Set(
         (input.mcpServers ?? []).map((value) => value.trim()).filter(Boolean),
       );
@@ -3468,6 +3601,14 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             defaultRules: RUNTIME_DEFAULT_RULES,
           },
         ) as Record<string, unknown>;
+        const desiredMcpServerKeys = readDesiredMcpServerIds(agent.runtimeConfig).flatMap((id) => {
+          const key = mcpIdToKey.get(id);
+          return key ? [key] : [];
+        });
+        if (desiredMcpServerKeys.length > 0) {
+          portableRuntimeConfig.desiredMcpServerKeys = desiredMcpServerKeys;
+        }
+        delete portableRuntimeConfig.desiredMcpServers;
         const portablePermissions = pruneDefaultLikeValue(agent.permissions ?? {}, { dropFalseBooleans: true }) as Record<string, unknown>;
         const agentEnvInputs = dedupeEnvInputs(
           envInputs
@@ -4332,6 +4473,8 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       existingProjectSlugToId.set(existing.urlKey, existing.id);
     }
 
+    const existingAgentById = new Map(existingAgents.map((agent) => [agent.id, agent]));
+
     const importedSkills = include.skills || include.agents
       ? await companySkills.importPackageFiles(targetCompany.id, pickTextFiles(plan.source.files), {
           onConflict: resolveSkillConflictStrategy(mode, plan.collisionStrategy),
@@ -4348,48 +4491,46 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       }
     }
 
+    const mcpKeyToId = new Map<string, string>();
+    const mcpIdRemap = new Map<string, string>();
+    if (include.mcpServers || include.agents) {
+      const existingMcpRows = await companyMcpServers.list(targetCompany.id);
+      for (const row of existingMcpRows) {
+        mcpKeyToId.set(row.key, row.id);
+        mcpIdRemap.set(row.id, row.id);
+      }
+    }
+
     if (include.mcpServers || include.agents) {
       for (const entry of plan.preview.manifest.mcpServers) {
         const existingByKey = await companyMcpServers.getByKey(targetCompany.id, entry.key);
         if (existingByKey) {
           if (plan.collisionStrategy === "skip") {
+            mcpKeyToId.set(entry.key, existingByKey.id);
+            mcpIdRemap.set(existingByKey.id, existingByKey.id);
             warnings.push(`Skipped MCP server "${entry.key}"; existing server kept.`);
             continue;
           }
           if (plan.collisionStrategy === "replace" || mode === "board_full") {
             await companyMcpServers.delete(targetCompany.id, existingByKey.id);
           } else {
+            mcpKeyToId.set(entry.key, existingByKey.id);
+            mcpIdRemap.set(existingByKey.id, existingByKey.id);
             warnings.push(`MCP server "${entry.key}" already exists in the target company. Skipping import.`);
             continue;
           }
         }
-        const envInput: Record<string, { kind: "literal"; value: string } | { kind: "secret"; secretKey: string }> = {};
-        for (const [envKey, raw] of Object.entries(entry.envTemplate)) {
-          const match = raw.match(/^\$\{secret:([a-z0-9][a-z0-9_-]*)\}$/);
-          if (match) {
-            const secretKey = match[1]!;
-            const existingSecret = await db
-              .select({ id: companySecrets.id })
-              .from(companySecrets)
-              .where(and(
-                eq(companySecrets.companyId, targetCompany.id),
-                eq(companySecrets.key, secretKey),
-                ne(companySecrets.status, "deleted"),
-              ))
-              .then((rows) => rows[0] ?? null);
-            if (existingSecret) {
-              envInput[envKey] = { kind: "secret", secretKey };
-            } else {
-              warnings.push(
-                `MCP server "${entry.key}" env ${envKey} references missing secret "${secretKey}" in target company — dropping the env entry. Recreate the secret and edit the MCP server to re-link it.`,
-              );
-            }
-          } else {
-            envInput[envKey] = { kind: "literal", value: raw };
-          }
-        }
+        const preservedEnvTemplate = existingByKey?.envTemplate ?? {};
+        const mergedEnvTemplate = mergeMcpEnvTemplates(preservedEnvTemplate, entry.envTemplate);
+        const envInput = await buildMcpImportEnvInput(
+          db,
+          targetCompany.id,
+          entry.key,
+          mergedEnvTemplate,
+          warnings,
+        );
         try {
-          await companyMcpServers.create(targetCompany.id, {
+          const created = await companyMcpServers.create(targetCompany.id, {
             key: entry.key,
             name: entry.name,
             description: entry.description,
@@ -4399,6 +4540,10 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             enabled: entry.enabled,
             metadata: entry.metadata ?? null,
           });
+          mcpKeyToId.set(entry.key, created.id);
+          if (existingByKey) {
+            mcpIdRemap.set(existingByKey.id, created.id);
+          }
         } catch (err) {
           warnings.push(
             `Failed to import MCP server "${entry.key}": ${err instanceof Error ? err.message : String(err)}`,
@@ -4464,9 +4609,18 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
 
         // Apply adapter overrides from request if present
         const adapterOverride = input.adapterOverrides?.[planAgent.slug];
-        const baseAdapterConfig = adapterOverride?.adapterConfig
+        let baseAdapterConfig = adapterOverride?.adapterConfig
           ? { ...adapterOverride.adapterConfig }
           : { ...manifestAgent.adapterConfig } as Record<string, unknown>;
+        const existingAgent = planAgent.existingAgentId
+          ? existingAgentById.get(planAgent.existingAgentId) ?? null
+          : null;
+        if (existingAgent && planAgent.action === "update") {
+          baseAdapterConfig = mergePreservedImportAdapterConfig(
+            (existingAgent.adapterConfig as Record<string, unknown>) ?? {},
+            baseAdapterConfig,
+          );
+        }
 
         const desiredSkills = (manifestAgent.skills ?? []).map((skillRef) => desiredSkillRefMap.get(skillRef) ?? skillRef);
         const normalizedAdapter = await prepareImportedAgentAdapter(
@@ -4475,6 +4629,14 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           baseAdapterConfig,
           desiredSkills,
           mode,
+        );
+        const inheritExistingMcp = planAgent.action === "update" || Boolean(existingAgent);
+        const runtimeConfig = resolveImportedAgentRuntimeConfig(
+          existingAgent?.runtimeConfig ?? null,
+          manifestAgent.runtimeConfig,
+          mcpKeyToId,
+          mcpIdRemap,
+          { inheritExistingMcp },
         );
         const patch = {
           name: planAgent.plannedName,
@@ -4485,7 +4647,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           reportsTo: null,
           adapterType: normalizedAdapter.adapterType,
           adapterConfig: normalizedAdapter.adapterConfig,
-          runtimeConfig: disableImportedTimerHeartbeat(manifestAgent.runtimeConfig),
+          runtimeConfig,
           budgetMonthlyCents: manifestAgent.budgetMonthlyCents,
           permissions: manifestAgent.permissions,
           metadata: manifestAgent.metadata,
@@ -4617,6 +4779,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             ?? existingSlugToAgentId.get(manifestProject.leadAgentSlug)
             ?? null
           : null;
+        const existingProject = planProject.existingProjectId
+          ? await projects.getById(planProject.existingProjectId)
+          : null;
         const projectWorkspaceIdByKey = new Map<string, string>();
         const projectPatch = {
           name: planProject.plannedName,
@@ -4627,7 +4792,12 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           status: manifestProject.status && PROJECT_STATUSES.includes(manifestProject.status as any)
             ? manifestProject.status as typeof PROJECT_STATUSES[number]
             : "backlog",
-          env: manifestProject.env,
+          env: existingProject && planProject.action === "update"
+            ? mergePreservedImportProjectEnv(
+              normalizePortableProjectEnv(existingProject.env),
+              manifestProject.env,
+            )
+            : manifestProject.env,
           executionWorkspacePolicy: stripPortableProjectExecutionWorkspaceRefs(manifestProject.executionWorkspacePolicy),
         };
 
