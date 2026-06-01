@@ -44,6 +44,10 @@ function MarkdownIssueLink({
     queryKey: queryKeys.issues.detail(issuePathId),
     queryFn: () => issuesApi.get(issuePathId),
     staleTime: 60_000,
+    // A run transcript can contain dozens of identifier-shaped tokens
+    // (PAP-123, ZED-24…) that don't correspond to real issues. Retrying each
+    // 404 three times amplifies the network spam visible in DevTools.
+    retry: false,
   });
 
   const identifier = data?.identifier ?? issuePathId;

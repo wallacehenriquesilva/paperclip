@@ -6,8 +6,30 @@ type MarkdownNode = {
 };
 
 const BARE_ISSUE_IDENTIFIER_RE = /^[A-Z][A-Z0-9]*-\d+$/i;
+const UUID_LIKE_ISSUE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISSUE_SCHEME_RE = /^issue:\/\/:?([^?#\s]+)(?:[?#].*)?$/i;
 const ISSUE_REFERENCE_TOKEN_RE = /issue:\/\/:?[^\s<>()]+|https?:\/\/[^\s<>()]+|\/(?:[^\s<>()/]+\/)*issues\/[A-Z][A-Z0-9]*-\d+(?=$|[\s<>)\],.;!?:])|\b[A-Z][A-Z0-9]*-\d+\b/gi;
+
+/**
+ * Reject obvious placeholder strings that show up in agent transcripts and
+ * runbook templates — e.g. `<issue-identifier>`, `{issueId}`, `:id`. Without
+ * this guard, the markdown renderer would build an `<a>` element for each such
+ * literal, MarkdownIssueLink would mount, and we'd fire a 404 fetch per token.
+ *
+ * An id is considered valid iff it matches a bare identifier (`XXX-NNN`) or a
+ * UUID-like string. Anything else (placeholders, partial paths, refs with
+ * stray punctuation) is rejected.
+ */
+export function isValidIssuePathId(value: string | null | undefined): value is string {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return false;
+  // Containing angle brackets, braces, parens, brackets, or whitespace means
+  // this is almost certainly a template placeholder or a bad parse.
+  if (/[<>{}\[\]()\s]/.test(trimmed)) return false;
+  if (trimmed.startsWith(":")) return false;
+  return BARE_ISSUE_IDENTIFIER_RE.test(trimmed) || UUID_LIKE_ISSUE_ID_RE.test(trimmed);
+}
 
 export function parseIssuePathIdFromPath(pathOrUrl: string | null | undefined): string | null {
   if (!pathOrUrl) return null;
@@ -29,6 +51,7 @@ export function parseIssueReferenceFromHref(href: string | null | undefined) {
   const issueSchemeMatch = trimmed.match(ISSUE_SCHEME_RE);
   if (issueSchemeMatch?.[1]) {
     const issuePathId = decodeURIComponent(issueSchemeMatch[1]);
+    if (!isValidIssuePathId(issuePathId)) return null;
     return {
       issuePathId,
       href: `/issues/${encodeURIComponent(issuePathId)}`,
@@ -37,6 +60,7 @@ export function parseIssueReferenceFromHref(href: string | null | undefined) {
 
   const pathId = parseIssuePathIdFromPath(href);
   if (pathId) {
+    if (!isValidIssuePathId(pathId)) return null;
     return {
       issuePathId: pathId,
       href: `/issues/${encodeURIComponent(pathId)}`,

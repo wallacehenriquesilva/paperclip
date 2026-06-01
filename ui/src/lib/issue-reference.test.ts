@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseIssuePathIdFromPath, parseIssueReferenceFromHref } from "./issue-reference";
+import { isValidIssuePathId, parseIssuePathIdFromPath, parseIssueReferenceFromHref } from "./issue-reference";
 
 describe("issue-reference", () => {
   it("extracts issue ids from company-scoped issue paths", () => {
@@ -65,5 +65,53 @@ describe("issue-reference", () => {
   it("ignores literal route placeholder paths", () => {
     expect(parseIssueReferenceFromHref("/issues/:id")).toBeNull();
     expect(parseIssueReferenceFromHref("http://localhost:3100/api/issues/:id")).toBeNull();
+  });
+
+  it("rejects placeholder identifiers in issue:// scheme hrefs", () => {
+    // Real-world breakage: agent transcripts and runbook templates contain
+    // sample text like `issue://<issue-identifier>` or `issue://{issueId}`.
+    // Without filtering these out, the markdown renderer mounts a MarkdownIssueLink
+    // for each one and fires a 404 fetch per occurrence.
+    expect(parseIssueReferenceFromHref("issue://<issue-identifier>")).toBeNull();
+    expect(parseIssueReferenceFromHref("issue://{issueId}")).toBeNull();
+    expect(parseIssueReferenceFromHref("issue://[issue-id]")).toBeNull();
+    expect(parseIssueReferenceFromHref("issue://(issueId)")).toBeNull();
+    expect(parseIssueReferenceFromHref("issue://ZED-24)")).toBeNull();
+    expect(parseIssueReferenceFromHref("issue://my issue")).toBeNull();
+  });
+
+  it("rejects placeholder identifiers embedded in /issues/ paths", () => {
+    expect(parseIssueReferenceFromHref("/issues/<issue-identifier>")).toBeNull();
+    expect(parseIssueReferenceFromHref("/issues/{issueId}")).toBeNull();
+    expect(parseIssueReferenceFromHref("/PAP/issues/{issueId}")).toBeNull();
+  });
+
+  it("still accepts UUID-like ids via issue:// scheme", () => {
+    expect(parseIssueReferenceFromHref("issue://abcdef12-3456-7890-abcd-ef0123456789")).toEqual({
+      issuePathId: "abcdef12-3456-7890-abcd-ef0123456789",
+      href: "/issues/abcdef12-3456-7890-abcd-ef0123456789",
+    });
+  });
+
+  describe("isValidIssuePathId", () => {
+    it("accepts bare identifiers and UUID-like ids", () => {
+      expect(isValidIssuePathId("PAP-1271")).toBe(true);
+      expect(isValidIssuePathId("pc1a2-7")).toBe(true);
+      expect(isValidIssuePathId("abcdef12-3456-7890-abcd-ef0123456789")).toBe(true);
+    });
+
+    it("rejects placeholders and structurally invalid ids", () => {
+      expect(isValidIssuePathId("")).toBe(false);
+      expect(isValidIssuePathId("   ")).toBe(false);
+      expect(isValidIssuePathId(null)).toBe(false);
+      expect(isValidIssuePathId(undefined)).toBe(false);
+      expect(isValidIssuePathId("<issue-identifier>")).toBe(false);
+      expect(isValidIssuePathId("{issueId}")).toBe(false);
+      expect(isValidIssuePathId(":id")).toBe(false);
+      expect(isValidIssuePathId("ZED-24)")).toBe(false);
+      expect(isValidIssuePathId("PAP-")).toBe(false);
+      expect(isValidIssuePathId("PAP")).toBe(false);
+      expect(isValidIssuePathId("123-PAP")).toBe(false);
+    });
   });
 });
