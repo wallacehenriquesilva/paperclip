@@ -76,6 +76,7 @@ import {
   ArrowLeft,
   HelpCircle,
   FolderOpen,
+  Zap,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -942,10 +943,18 @@ export function AgentDetail() {
     return <Navigate to={`/agents/${canonicalAgentRef}/dashboard`} replace />;
   }
   const isPendingApproval = agent.status === "pending_approval";
+  const claudeFallback = readClaudeFallbackBanner(agent.metadata);
   const showConfigActionBar = (activeView === "configuration" || activeView === "instructions" || activeView === "scripts") && (configDirty || configSaving);
 
   return (
     <div className={cn("space-y-6", isMobile && showConfigActionBar && "pb-24")}>
+      {claudeFallback ? (
+        <ClaudeFallbackBanner
+          state={claudeFallback}
+          agentId={agent.id}
+          companyId={agent.companyId}
+        />
+      ) : null}
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-3 min-w-0">
@@ -4611,6 +4620,118 @@ function ScriptsTab({
           starting with <code>#!</code> are chmod +x&apos;d on save. PAPERCLIP_* env vars are
           injected automatically — see the seed <code>run.sh</code> for examples.
         </p>
+      </div>
+    </div>
+  );
+}
+
+interface ClaudeFallbackBannerState {
+  untilIso: string;
+  reason: string;
+  activatedAt: string | null;
+  triggerRunId: string | null;
+}
+
+function readClaudeFallbackBanner(
+  metadata: Record<string, unknown> | null | undefined,
+): ClaudeFallbackBannerState | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const raw = (metadata as Record<string, unknown>).claudeFallback;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const untilIso = typeof record.untilIso === "string" ? record.untilIso : null;
+  if (!untilIso) return null;
+  const until = new Date(untilIso);
+  if (!Number.isFinite(until.getTime()) || until.getTime() <= Date.now()) return null;
+  return {
+    untilIso,
+    reason: typeof record.reason === "string" ? record.reason : "session_limit",
+    activatedAt: typeof record.activatedAt === "string" ? record.activatedAt : null,
+    triggerRunId: typeof record.triggerRunId === "string" ? record.triggerRunId : null,
+  };
+}
+
+function formatCountdown(untilIso: string): string {
+  const until = new Date(untilIso);
+  const deltaMs = until.getTime() - Date.now();
+  if (deltaMs <= 0) return "any moment now";
+  const minutes = Math.floor(deltaMs / 60_000);
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  if (hours <= 0) return `${minutes}m`;
+  if (remMinutes === 0) return `${hours}h`;
+  return `${hours}h ${remMinutes}m`;
+}
+
+function ClaudeFallbackBanner({
+  state,
+  agentId,
+  companyId,
+}: {
+  state: ClaudeFallbackBannerState;
+  agentId: string;
+  companyId: string;
+}) {
+  const queryClient = useQueryClient();
+  const { pushToast } = useToastActions();
+  const revertMutation = useMutation({
+    mutationFn: () => agentsApi.revertClaudeFallback(agentId, companyId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
+      pushToast({
+        tone: "success",
+        title: "Reverted to subscription billing",
+        body: "Future runs will use the Claude subscription. Hitting the limit again will reactivate fallback automatically.",
+      });
+    },
+    onError: (err) => {
+      pushToast({
+        tone: "error",
+        title: "Could not revert fallback",
+        body: err instanceof Error ? err.message : String(err),
+      });
+    },
+  });
+
+  const untilLocal = new Date(state.untilIso).toLocaleString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  });
+  return (
+    <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-4 py-3 flex items-start gap-3">
+      <Zap className="h-4 w-4 mt-0.5 text-amber-600 shrink-0" />
+      <div className="min-w-0 flex-1 text-sm">
+        <div className="font-medium text-amber-900 dark:text-amber-200">
+          Claude subscription limited — running on Anthropic API until {untilLocal}
+        </div>
+        <p className="mt-0.5 text-xs text-amber-800/80 dark:text-amber-200/70">
+          Auto-revert to subscription billing in {formatCountdown(state.untilIso)}.
+          {state.triggerRunId ? (
+            <>
+              {" · activated by run "}
+              <code className="font-mono">{state.triggerRunId.slice(0, 8)}</code>
+            </>
+          ) : null}
+        </p>
+      </div>
+      <div className="shrink-0">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            if (window.confirm(
+              "Revert to Claude subscription billing now? If the limit hasn't reset, the next run will likely hit it again and re-activate the fallback.",
+            )) {
+              revertMutation.mutate();
+            }
+          }}
+          disabled={revertMutation.isPending}
+          className="border-amber-500/40 text-amber-900 dark:text-amber-200 hover:bg-amber-500/10"
+        >
+          {revertMutation.isPending ? "Reverting…" : "Revert Now"}
+        </Button>
       </div>
     </div>
   );

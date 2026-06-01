@@ -25,6 +25,32 @@ export interface AgentRuntimeConfig extends Record<string, unknown> {
   modelProfiles?: Partial<Record<ModelProfileKey, AgentModelProfileConfig>>;
 }
 
+/**
+ * Operator-configured fallback policy for the claude-local adapter.
+ * When enabled and a Claude subscription session limit fires, the heartbeat
+ * temporarily injects ANTHROPIC_API_KEY (resolved from apiKeySecretRef) so
+ * the agent keeps working on metered API instead of sitting idle until reset.
+ * Lives at `agent.adapterConfig.claudeFallback`.
+ */
+export interface AgentClaudeFallbackConfig {
+  enabled: boolean;
+  apiKeySecretRef?: string;
+}
+
+export type AgentClaudeFallbackReason = "session_limit" | "rate_limit" | "other";
+
+/**
+ * Runtime state recording an active subscription→API fallback for this agent.
+ * Lives at `agent.metadata.claudeFallback` (set by heartbeat after detection;
+ * cleared automatically when untilIso is in the past).
+ */
+export interface AgentClaudeFallbackState {
+  untilIso: string;
+  reason: AgentClaudeFallbackReason;
+  activatedAt: string;
+  triggerRunId: string | null;
+}
+
 export type AgentInstructionsBundleMode = "managed" | "external";
 
 export interface AgentInstructionsFileSummary {

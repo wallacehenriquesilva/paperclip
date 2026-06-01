@@ -508,6 +508,16 @@ export interface CreateConfigValues {
   maxTurnsPerRun: number;
   heartbeatEnabled: boolean;
   intervalSec: number;
+  /**
+   * claude-local-only: opt-in policy that lets the agent automatically
+   * switch to ANTHROPIC_API_KEY billing when the Claude subscription
+   * session limit fires. Reverts to subscription billing when the limit
+   * resets.
+   */
+  claudeFallback?: {
+    enabled: boolean;
+    apiKeySecretRef?: string;
+  };
   /** Arbitrary key-value pairs populated by schema-driven config fields. */
   adapterSchemaValues?: Record<string, unknown>;
 }
