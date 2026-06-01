@@ -45,16 +45,55 @@ export const upsertAgentScriptFileSchema = z.object({
 
 export type UpsertAgentScriptFile = z.infer<typeof upsertAgentScriptFileSchema>;
 
+const SECRET_REFERENCE_PATTERN = /^\$\{secret:([a-z0-9][a-z0-9_-]*)\}$/;
+
+export const claudeFallbackConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    apiKeySecretRef: z
+      .string()
+      .regex(SECRET_REFERENCE_PATTERN, {
+        message: "apiKeySecretRef must be a ${secret:...} reference",
+      })
+      .optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.enabled && !value.apiKeySecretRef) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["apiKeySecretRef"],
+        message: "apiKeySecretRef is required when claudeFallback.enabled is true",
+      });
+    }
+  });
+
+export type ClaudeFallbackConfig = z.infer<typeof claudeFallbackConfigSchema>;
+
 const adapterConfigSchema = z.record(z.unknown()).superRefine((value, ctx) => {
   const envValue = value.env;
-  if (envValue === undefined) return;
-  const parsed = envConfigSchema.safeParse(envValue);
-  if (!parsed.success) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "adapterConfig.env must be a map of valid env bindings",
-      path: ["env"],
-    });
+  if (envValue !== undefined) {
+    const parsed = envConfigSchema.safeParse(envValue);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "adapterConfig.env must be a map of valid env bindings",
+        path: ["env"],
+      });
+    }
+  }
+  const claudeFallback = value.claudeFallback;
+  if (claudeFallback !== undefined) {
+    const parsed = claudeFallbackConfigSchema.safeParse(claudeFallback);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: issue.message,
+          path: ["claudeFallback", ...issue.path],
+        });
+      }
+    }
   }
 });
 

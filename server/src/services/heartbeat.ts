@@ -64,6 +64,11 @@ import { companyMcpServerService } from "./company-mcp-servers.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { mcpOAuthService } from "./mcp-oauth.js";
+import {
+  applyClaudeFallbackPostRun,
+  resolveClaudeFallbackEnvInjection,
+  type ClaudeFallbackPostRunResult,
+} from "./claude-fallback.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import {
   buildHeartbeatRunIssueComment,
@@ -7165,6 +7170,63 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       paperclipRuntimeSkills: runtimeSkillEntries,
       paperclipResolvedMcpServers,
     };
+
+    // Claude subscription -> API fallback: when agent.metadata.claudeFallback
+    // is active and the operator has configured an API key secret ref on the
+    // agent's adapterConfig.claudeFallback, inject ANTHROPIC_API_KEY into the
+    // runtime config AND the per-run context. The adapter prefers the context
+    // value at spawn time, which guarantees the key reaches `claude` even if
+    // some intermediate layer rewrites runtimeConfig.env.
+    if (agent.adapterType === "claude_local") {
+      const fallbackInjection = await resolveClaudeFallbackEnvInjection({
+        agent,
+        secretsSvc,
+        db,
+      });
+      if (fallbackInjection) {
+        const mergedEnv = {
+          ...parseObject((runtimeConfig as Record<string, unknown>).env),
+          ANTHROPIC_API_KEY: fallbackInjection.apiKey,
+        };
+        runtimeConfig = {
+          ...runtimeConfig,
+          env: mergedEnv,
+        } as typeof runtimeConfig;
+        // Context channel — adapter reads this directly and forces it into
+        // the spawn env right before calling claude. Belt + suspenders so
+        // any future refactor of runtimeConfig.env doesn't silently break
+        // billing-mode fallback.
+        context.paperclipClaudeFallbackApiKey = fallbackInjection.apiKey;
+        context.paperclipClaudeFallbackUntilIso = fallbackInjection.state.untilIso;
+        logger.info(
+          {
+            agentId: agent.id,
+            runId: run.id,
+            untilIso: fallbackInjection.state.untilIso,
+            apiKeyPrefix: fallbackInjection.apiKey.slice(0, 7) + "…",
+          },
+          "Claude subscription fallback: injected ANTHROPIC_API_KEY into runtime env + context",
+        );
+      } else {
+        // Diagnostic: when metadata says fallback is active but injection
+        // returned null, surface the reason so the operator can act on it
+        // (missing secret, wrong ref, key was deleted, etc.).
+        const stateRaw = (agent.metadata as Record<string, unknown> | null | undefined)?.claudeFallback;
+        if (stateRaw && typeof stateRaw === "object") {
+          logger.warn(
+            {
+              agentId: agent.id,
+              runId: run.id,
+              fallbackState: stateRaw,
+              adapterConfigHasFallback: Boolean(
+                (agent.adapterConfig as Record<string, unknown> | null | undefined)?.claudeFallback,
+              ),
+            },
+            "Claude fallback is active in metadata but env injection skipped — check adapterConfig.claudeFallback.enabled and apiKeySecretRef",
+          );
+        }
+      }
+    }
     const workspaceOperationRecorder = workspaceOperationsSvc.createRecorder({
       companyId: agent.companyId,
       heartbeatRunId: run.id,
@@ -7970,6 +8032,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             );
           }
         }
+        // Claude subscription → API fallback runs FIRST so it can short-circuit
+        // the bounded transient retry below. The default transient retry would
+        // honor retryNotBefore and schedule the next run at the subscription
+        // reset time (e.g. 8:50pm) — but when fallback activates we already
+        // have an API key + an immediate wakeup queued, so the bounded retry
+        // would just add a duplicate run delayed by hours.
+        let claudeFallbackResult: ClaudeFallbackPostRunResult = {
+          fallbackActivated: false,
+          fallbackDeactivated: false,
+        };
+        try {
+          claudeFallbackResult = await applyClaudeFallbackPostRun({
+            db,
+            agent,
+            adapterResult,
+            triggerRunId: run.id,
+            actions: { enqueueWakeup },
+          });
+        } catch (fallbackErr) {
+          logger.warn(
+            { err: fallbackErr, runId: run.id, agentId: agent.id },
+            "Claude fallback post-run handling failed",
+          );
+        }
+
         if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
           const policy = parseMaxTurnContinuationPolicy(agent);
           if (policy.enabled && policy.maxAttempts > 0) {
@@ -7991,7 +8078,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               },
             });
           }
-        } else if (outcome === "failed" && readTransientRecoveryContractFromRun(livenessRun)) {
+        } else if (
+          outcome === "failed" &&
+          !claudeFallbackResult.fallbackActivated &&
+          readTransientRecoveryContractFromRun(livenessRun)
+        ) {
           await scheduleBoundedRetryForRun(livenessRun, agent);
         }
         const issueCommentPolicyResult = await finalizeIssueCommentPolicy(livenessRun, agent);

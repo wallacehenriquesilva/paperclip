@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractClaudeRetryNotBefore,
   isClaudeTransientUpstreamError,
+  parseClaudeStreamJson,
 } from "./parse.js";
 
 describe("isClaudeTransientUpstreamError", () => {
@@ -119,5 +120,102 @@ describe("extractClaudeRetryNotBefore", () => {
     expect(
       extractClaudeRetryNotBefore({ errorMessage: "Overloaded. Try again later." }, new Date()),
     ).toBeNull();
+  });
+
+  it("parses the 'session limit · resets 8:50pm (UTC)' assistant message (5h cap)", () => {
+    const now = new Date("2026-05-29T15:00:00.000Z");
+    const extracted = extractClaudeRetryNotBefore(
+      { errorMessage: "You've hit your session limit · resets 8:50pm (UTC)" },
+      now,
+    );
+    expect(extracted?.toISOString()).toBe("2026-05-29T20:50:00.000Z");
+  });
+
+  it("prefers the structured rate_limit_event resetsAt over scraping the message", () => {
+    const now = new Date("2026-05-29T15:00:00.000Z");
+    const resetsAt = new Date("2026-05-29T20:50:00.000Z");
+    const extracted = extractClaudeRetryNotBefore(
+      {
+        errorMessage: "You've hit your session limit · resets 8:50pm (UTC)",
+        rateLimit: { resetsAt },
+      },
+      now,
+    );
+    expect(extracted?.toISOString()).toBe(resetsAt.toISOString());
+  });
+});
+
+describe("isClaudeTransientUpstreamError (extended message phrasings)", () => {
+  it("matches 'hit your org's monthly usage limit'", () => {
+    expect(
+      isClaudeTransientUpstreamError({
+        errorMessage: "You've hit your org's monthly usage limit · resets June 1 (UTC)",
+      }),
+    ).toBe(true);
+  });
+
+  it("matches 'monthly limit reached'", () => {
+    expect(
+      isClaudeTransientUpstreamError({ errorMessage: "monthly limit reached" }),
+    ).toBe(true);
+  });
+
+  it("matches structured rate_limit_event status=rejected even when message phrasing is unknown", () => {
+    expect(
+      isClaudeTransientUpstreamError({
+        errorMessage: "Some new phrasing we have never seen before",
+        rateLimit: { status: "rejected", resetsAt: new Date() },
+      }),
+    ).toBe(true);
+  });
+
+  it("does NOT match unrelated errors", () => {
+    expect(
+      isClaudeTransientUpstreamError({ errorMessage: "Permission denied: file not writable" }),
+    ).toBe(false);
+  });
+});
+
+describe("extractClaudeRetryNotBefore for monthly limits", () => {
+  it("extracts the reset hint from a monthly-usage message", () => {
+    const now = new Date("2026-05-31T15:00:00.000Z");
+    const extracted = extractClaudeRetryNotBefore(
+      { errorMessage: "You've hit your org's monthly usage limit · resets 9pm (UTC)" },
+      now,
+    );
+    expect(extracted?.toISOString()).toBe("2026-05-31T21:00:00.000Z");
+  });
+});
+
+describe("parseClaudeStreamJson rate_limit_event capture", () => {
+  it("captures rate_limit_event into the rateLimit field of the stream snapshot", () => {
+    // Real-world event Claude emits when the 5-hour session limit fires.
+    const stdout = [
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          resetsAt: 1780087800,
+          rateLimitType: "five_hour",
+          overageStatus: "rejected",
+          overageDisabledReason: "org_level_disabled_until",
+          isUsingOverage: false,
+        },
+        uuid: "b240e450-f173-4b8c-a3dd-08bc53ec62b5",
+        session_id: "9c4a10c7-6450-4c00-95f8-1f1bf2aa0148",
+      }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: "You've hit your session limit · resets 8:50pm (UTC)",
+        session_id: "9c4a10c7-6450-4c00-95f8-1f1bf2aa0148",
+      }),
+    ].join("\n");
+    const result = parseClaudeStreamJson(stdout);
+    expect(result.rateLimit).not.toBeNull();
+    expect(result.rateLimit?.rateLimitType).toBe("five_hour");
+    expect(result.rateLimit?.status).toBe("rejected");
+    expect(result.rateLimit?.resetsAt?.toISOString()).toBe(new Date(1780087800 * 1000).toISOString());
   });
 });

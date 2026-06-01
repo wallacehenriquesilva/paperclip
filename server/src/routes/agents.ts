@@ -2,8 +2,16 @@ import { Router, type Request, type Response } from "express";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, companies, heartbeatRuns, issues as issuesTable } from "@paperclipai/db";
-import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
+import {
+  agents as agentsTable,
+  companies,
+  companySecretBindings,
+  companySecrets,
+  heartbeatRuns,
+  issues as issuesTable,
+} from "@paperclipai/db";
+import { parseSecretReference } from "@paperclipai/shared";
+import { and, desc, eq, inArray, like, not, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
   agentMineInboxQuerySchema,
@@ -2869,6 +2877,11 @@ export function agentRoutes(
         { targetType: "agent", targetId: agent.id, pathPrefix: "headers" },
         agentHeaders,
       );
+      // Sync the claudeFallback API key binding (claude-local only). Always
+      // run because we need to clear orphan bindings when the toggle is
+      // turned off OR the secret ref is changed. The configPath here MUST
+      // match the resolveSecretValue call site in claude-fallback.ts.
+      await syncClaudeFallbackBinding(db, agent);
     }
 
     await logActivity(db, {
@@ -2884,6 +2897,46 @@ export function agentRoutes(
     });
 
     res.json(agent);
+  });
+
+  router.post("/agents/:id/claude-fallback/revert", async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const existing = await getAccessibleAgent(req, res, id);
+    if (!existing) return;
+
+    const metadata = asRecord(existing.metadata) ?? {};
+    const claudeFallback = metadata.claudeFallback;
+    if (!claudeFallback) {
+      res.status(409).json({ error: "Agent does not have an active Claude fallback to revert" });
+      return;
+    }
+
+    const { claudeFallback: _removed, ...rest } = metadata;
+    const nextMetadata = Object.keys(rest).length > 0 ? rest : null;
+    const updated = await svc.update(id, { metadata: nextMetadata });
+    if (!updated) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+
+    const stateRecord = asRecord(claudeFallback) ?? {};
+    await logActivity(db, {
+      companyId: updated.companyId,
+      actorType: "user",
+      actorId: req.actor.userId ?? "board",
+      action: "claude.fallback_deactivated",
+      entityType: "agent",
+      entityId: updated.id,
+      details: {
+        untilIso: typeof stateRecord.untilIso === "string" ? stateRecord.untilIso : null,
+        activatedAt: typeof stateRecord.activatedAt === "string" ? stateRecord.activatedAt : null,
+        triggerRunId: typeof stateRecord.triggerRunId === "string" ? stateRecord.triggerRunId : null,
+        revertSource: "manual",
+      },
+    });
+
+    res.json(updated);
   });
 
   router.post("/agents/:id/pause", async (req, res) => {
@@ -3732,4 +3785,56 @@ export function agentRoutes(
   });
 
   return router;
+}
+
+async function syncClaudeFallbackBinding(
+  db: Db,
+  agent: { id: string; companyId: string; adapterConfig: Record<string, unknown> | null | undefined },
+) {
+  const adapterConfig = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+  const claudeFallback = adapterConfig.claudeFallback as
+    | { enabled?: boolean; apiKeySecretRef?: string }
+    | undefined;
+
+  // Resolve the secretId we want to bind (or null to clear bindings).
+  let secretId: string | null = null;
+  const rawRef =
+    typeof claudeFallback?.apiKeySecretRef === "string"
+      ? claudeFallback.apiKeySecretRef.trim()
+      : "";
+  if (rawRef && claudeFallback?.enabled !== false) {
+    const secretKey = parseSecretReference(rawRef);
+    if (secretKey) {
+      const row = await db
+        .select({ id: companySecrets.id, status: companySecrets.status })
+        .from(companySecrets)
+        .where(and(eq(companySecrets.companyId, agent.companyId), eq(companySecrets.key, secretKey)))
+        .then((rows) => rows[0] ?? null);
+      if (row && row.status !== "deleted") secretId = row.id;
+    }
+  }
+
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(companySecretBindings)
+      .where(
+        and(
+          eq(companySecretBindings.companyId, agent.companyId),
+          eq(companySecretBindings.targetType, "agent"),
+          eq(companySecretBindings.targetId, agent.id),
+          like(companySecretBindings.configPath, "claudeFallback.%"),
+        ),
+      );
+    if (secretId) {
+      await tx.insert(companySecretBindings).values({
+        companyId: agent.companyId,
+        secretId,
+        targetType: "agent",
+        targetId: agent.id,
+        configPath: "claudeFallback.apiKeySecretRef",
+        versionSelector: "latest",
+        required: true,
+      });
+    }
+  });
 }

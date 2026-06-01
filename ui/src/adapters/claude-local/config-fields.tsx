@@ -8,6 +8,8 @@ import {
 } from "../../components/agent-config-primitives";
 import { ChoosePathButton } from "../../components/PathInstructionsModal";
 import { LocalWorkspaceRuntimeFields } from "../local-workspace-runtime-fields";
+import { SecretRefPicker } from "../../components/SecretRefPicker";
+import { useCompany } from "../../context/CompanyContext";
 
 const inputClass =
   "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
@@ -133,6 +135,114 @@ export function ClaudeLocalAdvancedFields({
           />
         )}
       </Field>
+      <ClaudeFallbackFields
+        isCreate={isCreate}
+        values={values}
+        set={set}
+        config={config}
+        eff={eff}
+        mark={mark}
+      />
     </>
+  );
+}
+
+function ClaudeFallbackFields({
+  isCreate,
+  values,
+  set,
+  config,
+  eff,
+  mark,
+}: Pick<AdapterConfigFieldsProps, "isCreate" | "values" | "set" | "config" | "eff" | "mark">) {
+  const persistedFallback = (config.claudeFallback ?? {}) as {
+    enabled?: boolean;
+    apiKeySecretRef?: string;
+  };
+  const fallbackValues = (values?.claudeFallback ?? {}) as {
+    enabled?: boolean;
+    apiKeySecretRef?: string;
+  };
+
+  // eff/mark store the value under a single flat key, so we keep the whole
+  // claudeFallback object under "claudeFallback" and derive .enabled /
+  // .apiKeySecretRef from the effective object.
+  const effectiveFallback = isCreate
+    ? {
+        enabled: Boolean(fallbackValues.enabled),
+        apiKeySecretRef: String(fallbackValues.apiKeySecretRef ?? ""),
+      }
+    : (eff(
+        "adapterConfig",
+        "claudeFallback",
+        persistedFallback as Record<string, unknown>,
+      ) as { enabled?: boolean; apiKeySecretRef?: string });
+
+  const enabled = Boolean(effectiveFallback.enabled);
+  const apiKeySecretRef = String(effectiveFallback.apiKeySecretRef ?? "");
+
+  function patchFallback(patch: { enabled?: boolean; apiKeySecretRef?: string }) {
+    const next = {
+      enabled: patch.enabled !== undefined ? patch.enabled : enabled,
+      apiKeySecretRef:
+        patch.apiKeySecretRef !== undefined ? patch.apiKeySecretRef : apiKeySecretRef,
+    };
+    if (isCreate) {
+      set!({ claudeFallback: next });
+    } else {
+      mark("adapterConfig", "claudeFallback", next);
+    }
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3 mt-3 space-y-3">
+      <ToggleField
+        label="Fall back to Anthropic API when subscription limits hit"
+        hint="When ON, hitting a Claude session limit (e.g. Pro 5h cap) switches this agent to metered API billing until the reset — instead of sitting idle. Reverts to subscription automatically once the limit resets."
+        checked={enabled}
+        onChange={(v) => patchFallback({ enabled: v })}
+      />
+      {enabled ? (
+        <Field
+          label="ANTHROPIC_API_KEY secret"
+          hint="Pick an existing company secret or create a new one inline. The value is stored encrypted and reusable in other agents."
+        >
+          <ClaudeFallbackSecretPicker
+            value={apiKeySecretRef}
+            onChange={(v) => patchFallback({ apiKeySecretRef: v })}
+          />
+        </Field>
+      ) : null}
+    </div>
+  );
+}
+
+function ClaudeFallbackSecretPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const { selectedCompanyId } = useCompany();
+  if (!selectedCompanyId) {
+    return (
+      <DraftInput
+        value={value}
+        onCommit={onChange}
+        immediate
+        className={inputClass}
+        placeholder="${secret:anthropic-api-key}"
+      />
+    );
+  }
+  return (
+    <SecretRefPicker
+      companyId={selectedCompanyId}
+      value={value}
+      onChange={onChange}
+      placeholder="Pick or create an Anthropic API key"
+      newSecretNameHint="Anthropic API key"
+    />
   );
 }

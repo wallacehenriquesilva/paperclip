@@ -134,6 +134,8 @@ export {
   testAdapterEnvironmentSchema,
   agentPermissionsSchema,
   updateAgentPermissionsSchema,
+  claudeFallbackConfigSchema,
+  type ClaudeFallbackConfig,
   type CreateAgent,
   type CreateAgentHire,
   type UpdateAgent,

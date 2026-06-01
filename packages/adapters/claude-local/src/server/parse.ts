@@ -10,14 +10,24 @@ const CLAUDE_AUTH_REQUIRED_RE = /(?:not\s+logged\s+in|please\s+log\s+in|please\s
 const URL_RE = /(https?:\/\/[^\s'"`<>()[\]{};,!?]+[^\s'"`<>()[\]{};,!.?:]+)/gi;
 
 const CLAUDE_TRANSIENT_UPSTREAM_RE =
-  /(?:rate[-\s]?limit(?:ed)?|rate_limit_error|too\s+many\s+requests|\b429\b|overloaded(?:_error)?|server\s+overloaded|service\s+unavailable|\b503\b|\b529\b|high\s+demand|try\s+again\s+later|temporarily\s+unavailable|throttl(?:ed|ing)|throttlingexception|servicequotaexceededexception|out\s+of\s+extra\s+usage|extra\s+usage\b|claude\s+usage\s+limit\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|usage\s+limit\s+reached|usage\s+cap\s+reached)/i;
+  /(?:rate[-\s]?limit(?:ed)?|rate_limit_error|too\s+many\s+requests|\b429\b|overloaded(?:_error)?|server\s+overloaded|service\s+unavailable|\b503\b|\b529\b|high\s+demand|try\s+again\s+later|temporarily\s+unavailable|throttl(?:ed|ing)|throttlingexception|servicequotaexceededexception|out\s+of\s+extra\s+usage|extra\s+usage\b|claude\s+usage\s+limit\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|monthly\s+(?:usage\s+)?limit(?:\s+reached)?|usage\s+limit(?:\s+reached)?|usage\s+cap\s+reached|session\s+limit(?:\s+reached)?|hit\s+(?:your\s+(?:org(?:'s|s)?\s+)?)?(?:session|monthly|weekly|usage)\s+limit|org(?:'s|s)?\s+(?:monthly|weekly|usage)\s+limit)/i;
 const CLAUDE_EXTRA_USAGE_RESET_RE =
-  /(?:out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,80}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
+  /(?:out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit(?:\s+reached)?|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|monthly\s+(?:usage\s+)?limit(?:\s+reached)?|claude\s+usage\s+limit\s+reached|session\s+limit(?:\s+reached)?|hit\s+(?:your\s+(?:org(?:'s|s)?\s+)?)?(?:session|monthly|weekly|usage)\s+limit|org(?:'s|s)?\s+(?:monthly|weekly|usage)\s+limit)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
+
+export interface ClaudeRateLimitSnapshot {
+  status: string | null;
+  rateLimitType: string | null;
+  resetsAt: Date | null;
+  isUsingOverage: boolean;
+  overageDisabledReason: string | null;
+  raw: Record<string, unknown>;
+}
 
 export function parseClaudeStreamJson(stdout: string) {
   let sessionId: string | null = null;
   let model = "";
   let finalResult: Record<string, unknown> | null = null;
+  let rateLimitSnapshot: ClaudeRateLimitSnapshot | null = null;
   const assistantTexts: string[] = [];
 
   for (const rawLine of stdout.split(/\r?\n/)) {
@@ -48,6 +58,26 @@ export function parseClaudeStreamJson(stdout: string) {
       continue;
     }
 
+    if (type === "rate_limit_event") {
+      const info = parseObject(event.rate_limit_info);
+      const resetsAtRaw = info.resetsAt;
+      let resetsAt: Date | null = null;
+      if (typeof resetsAtRaw === "number" && Number.isFinite(resetsAtRaw)) {
+        // Claude emits this as a UNIX timestamp in seconds.
+        resetsAt = new Date(resetsAtRaw * 1000);
+        if (!Number.isFinite(resetsAt.getTime())) resetsAt = null;
+      }
+      rateLimitSnapshot = {
+        status: asString(info.status, "") || null,
+        rateLimitType: asString(info.rateLimitType, "") || null,
+        resetsAt,
+        isUsingOverage: info.isUsingOverage === true,
+        overageDisabledReason: asString(info.overageDisabledReason, "") || null,
+        raw: info,
+      };
+      continue;
+    }
+
     if (type === "result") {
       finalResult = event;
       sessionId = asString(event.session_id, sessionId ?? "") || sessionId;
@@ -62,6 +92,7 @@ export function parseClaudeStreamJson(stdout: string) {
       usage: null as UsageSummary | null,
       summary: assistantTexts.join("\n\n").trim(),
       resultJson: null as Record<string, unknown> | null,
+      rateLimit: rateLimitSnapshot,
     };
   }
 
@@ -82,6 +113,7 @@ export function parseClaudeStreamJson(stdout: string) {
     usage,
     summary,
     resultJson: finalResult,
+    rateLimit: rateLimitSnapshot,
   };
 }
 
@@ -358,9 +390,19 @@ export function extractClaudeRetryNotBefore(
     stdout?: string | null;
     stderr?: string | null;
     errorMessage?: string | null;
+    /** Optional structured rate-limit snapshot from the stream parser. */
+    rateLimit?: { resetsAt: Date | null } | null;
   },
   now = new Date(),
 ): Date | null {
+  // Prefer the structured rate_limit_event resetsAt (UNIX timestamp) when the
+  // stream parser captured it — far more reliable than parsing free-form
+  // "resets 8:50pm UTC" strings out of the assistant message.
+  if (input.rateLimit?.resetsAt && Number.isFinite(input.rateLimit.resetsAt.getTime())) {
+    return input.rateLimit.resetsAt;
+  }
+
+  // Fall back to scraping the clock time out of the error/result message.
   const haystack = buildClaudeTransientHaystack(input);
   const match = haystack.match(CLAUDE_EXTRA_USAGE_RESET_RE);
   if (!match) return null;
@@ -372,6 +414,8 @@ export function isClaudeTransientUpstreamError(input: {
   stdout?: string | null;
   stderr?: string | null;
   errorMessage?: string | null;
+  /** Optional structured rate-limit snapshot from the stream parser. */
+  rateLimit?: { status: string | null; resetsAt: Date | null } | null;
 }): boolean {
   const parsed = input.parsed ?? null;
   // Deterministic failures are handled by their own classifiers.
@@ -384,6 +428,14 @@ export function isClaudeTransientUpstreamError(input: {
     stderr: input.stderr ?? "",
   });
   if (loginMeta.requiresLogin) return false;
+
+  // Structured signal takes precedence — if Claude emitted a `rate_limit_event`
+  // with `status: "rejected"`, the run is unambiguously a transient upstream
+  // failure regardless of how the assistant message is phrased (handles new
+  // limit categories like org monthly without needing regex updates).
+  if (input.rateLimit?.status === "rejected" || input.rateLimit?.status === "throttled") {
+    return true;
+  }
 
   const haystack = buildClaudeTransientHaystack(input);
   if (!haystack) return false;

@@ -134,6 +134,51 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
   return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
 }
 
+interface ResolvedClaudeFallbackConfig {
+  enabled: boolean;
+  apiKeySecretRef: string | null;
+}
+
+/**
+ * Reads the operator-configured fallback policy off the agent's adapterConfig.
+ * Returns null when the policy is missing or disabled — callers should treat
+ * that as "fallback is not eligible for this agent".
+ */
+function readClaudeFallbackConfig(config: Record<string, unknown>): ResolvedClaudeFallbackConfig | null {
+  const raw = config.claudeFallback;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+  const enabled = obj.enabled === true;
+  if (!enabled) return null;
+  const apiKeySecretRef = typeof obj.apiKeySecretRef === "string" ? obj.apiKeySecretRef : null;
+  return { enabled, apiKeySecretRef };
+}
+
+/**
+ * Returns the structured activation signal to attach to errorMeta when a
+ * subscription-mode run hits a session limit with a parseable reset time
+ * AND the operator opted into fallback for this agent. The heartbeat reads
+ * this off the run result and persists agent.metadata.claudeFallback so the
+ * next run can switch billing modes.
+ */
+function maybeBuildClaudeFallbackActivation(args: {
+  transientUpstream: boolean;
+  retryNotBefore: Date | null;
+  billingType: "api" | "subscription" | "metered_api";
+  fallbackConfig: ResolvedClaudeFallbackConfig | null;
+  triggerRunId: string;
+}): { untilIso: string; reason: "session_limit"; triggerRunId: string } | null {
+  if (!args.transientUpstream) return null;
+  if (!args.retryNotBefore) return null;
+  if (args.billingType !== "subscription") return null;
+  if (!args.fallbackConfig?.enabled || !args.fallbackConfig.apiKeySecretRef) return null;
+  return {
+    untilIso: args.retryNotBefore.toISOString(),
+    reason: "session_limit",
+    triggerRunId: args.triggerRunId,
+  };
+}
+
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, runtimeCommandSpec, executionTarget, authToken } = input;
   const onLog = input.onLog ?? (async () => {});
@@ -271,6 +316,22 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
 
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
+  }
+
+  // Claude subscription -> API fallback (bulletproof path):
+  // heartbeat sets context.paperclipClaudeFallbackApiKey when the agent has
+  // an active claudeFallback state with a resolved API key. We force it into
+  // env.ANTHROPIC_API_KEY here — at the LAST step before computing
+  // runtimeEnv — so no upstream config/env rewrite can drop it. process.env
+  // is also overridden because env wins over process.env in the spread below.
+  const fallbackApiKey = asString(context.paperclipClaudeFallbackApiKey, "");
+  if (fallbackApiKey) {
+    env.ANTHROPIC_API_KEY = fallbackApiKey;
+    const untilIso = asString(context.paperclipClaudeFallbackUntilIso, "");
+    await onLog(
+      "stdout",
+      `[paperclip] Claude subscription limit active${untilIso ? ` until ${untilIso}` : ""} — running this turn with ANTHROPIC_API_KEY (API billing).\n`,
+    );
   }
 
   const runtimeEnv = Object.fromEntries(
@@ -436,6 +497,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ),
   );
   const billingType = resolveClaudeBillingType(effectiveEnv);
+  const claudeFallbackConfig = readClaudeFallbackConfig(config);
   const claudeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = new Set(resolveClaudeDesiredSkillNames(config, claudeSkillEntries));
   // When instructionsFilePath is configured, build a stable content-addressed
@@ -841,6 +903,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           stdout: proc.stdout,
           stderr: proc.stderr,
           errorMessage: fallbackErrorMessage,
+          rateLimit: parsedStream.rateLimit ?? null,
         });
       const transientRetryNotBefore = transientUpstream
         ? extractClaudeRetryNotBefore({
@@ -848,6 +911,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             stdout: proc.stdout,
             stderr: proc.stderr,
             errorMessage: fallbackErrorMessage,
+            rateLimit: parsedStream.rateLimit ?? null,
           })
         : null;
       const errorCode = loginMeta.requiresLogin
@@ -855,6 +919,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         : transientUpstream
         ? "claude_transient_upstream"
         : null;
+      const fallbackActivation = maybeBuildClaudeFallbackActivation({
+        transientUpstream,
+        retryNotBefore: transientRetryNotBefore,
+        billingType,
+        fallbackConfig: claudeFallbackConfig,
+        triggerRunId: runId,
+      });
+      const enrichedErrorMeta = fallbackActivation
+        ? { ...(errorMeta ?? {}), claudeFallbackActivation: fallbackActivation }
+        : errorMeta;
       return {
         exitCode: proc.exitCode,
         signal: proc.signal,
@@ -863,7 +937,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         errorCode,
         errorFamily: transientUpstream ? "transient_upstream" : null,
         retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
-        errorMeta,
+        errorMeta: enrichedErrorMeta,
         resultJson: {
           stdout: proc.stdout,
           stderr: proc.stderr,
@@ -923,6 +997,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         stdout: proc.stdout,
         stderr: proc.stderr,
         errorMessage,
+        rateLimit: parsedStream.rateLimit ?? null,
       });
     const transientRetryNotBefore = transientUpstream
       ? extractClaudeRetryNotBefore({
@@ -930,6 +1005,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           stdout: proc.stdout,
           stderr: proc.stderr,
           errorMessage,
+          rateLimit: parsedStream.rateLimit ?? null,
         })
       : null;
     const resolvedErrorCode = loginMeta.requiresLogin
@@ -946,6 +1022,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
       ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
     };
+    const fallbackActivation = maybeBuildClaudeFallbackActivation({
+      transientUpstream,
+      retryNotBefore: transientRetryNotBefore,
+      billingType,
+      fallbackConfig: claudeFallbackConfig,
+      triggerRunId: runId,
+    });
+    const enrichedErrorMeta = fallbackActivation
+      ? { ...(errorMeta ?? {}), claudeFallbackActivation: fallbackActivation }
+      : errorMeta;
 
     return {
       exitCode: proc.exitCode,
@@ -955,7 +1041,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       errorCode: resolvedErrorCode,
       errorFamily: transientUpstream ? "transient_upstream" : null,
       retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
-      errorMeta,
+      errorMeta: enrichedErrorMeta,
       usage,
       sessionId: resolvedSessionId,
       sessionParams: resolvedSessionParams,
