@@ -195,6 +195,34 @@ describe("issue validators", () => {
     expect(parsed.requestDepth).toBe(MAX_ISSUE_REQUEST_DEPTH);
   });
 
+  it("accepts free-form metadata on create and update", () => {
+    const created = createIssueSchema.parse({
+      title: "With metadata",
+      metadata: {
+        prUrl: "https://github.com/owner/repo/pull/42",
+        engineerAgent: "engineer-backend",
+        nested: { level: 1, tags: ["a", "b"] },
+      },
+    });
+    expect(created.metadata).toEqual({
+      prUrl: "https://github.com/owner/repo/pull/42",
+      engineerAgent: "engineer-backend",
+      nested: { level: 1, tags: ["a", "b"] },
+    });
+
+    expect(updateIssueSchema.parse({ metadata: { prUrl: "https://x" } }).metadata).toEqual({
+      prUrl: "https://x",
+    });
+
+    expect(updateIssueSchema.parse({ metadata: null }).metadata).toBeNull();
+    expect(updateIssueSchema.parse({}).metadata).toBeUndefined();
+  });
+
+  it("rejects metadata that is not a JSON object", () => {
+    expect(() => createIssueSchema.parse({ title: "Bad metadata", metadata: "not an object" })).toThrow();
+    expect(() => createIssueSchema.parse({ title: "Array metadata", metadata: [1, 2, 3] })).toThrow();
+  });
+
   it("defaults omitted create status to todo when an assignee is present", () => {
     expect(createIssueSchema.parse({
       title: "Assigned work",
