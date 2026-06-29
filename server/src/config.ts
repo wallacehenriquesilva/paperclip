@@ -60,6 +60,7 @@ export interface Config {
   authBaseUrlMode: AuthBaseUrlMode;
   authPublicBaseUrl: string | undefined;
   authDisableSignUp: boolean;
+  authAllowedEmailDomains: string[];
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
@@ -213,6 +214,14 @@ export function loadConfig(): Config {
     disableSignUpFromEnv !== undefined
       ? disableSignUpFromEnv === "true"
       : (fileConfig?.auth?.disableSignUp ?? false);
+  const allowedEmailDomainsFromEnv = process.env.PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS;
+  const authAllowedEmailDomains: string[] = (
+    allowedEmailDomainsFromEnv !== undefined
+      ? allowedEmailDomainsFromEnv.split(",")
+      : (fileConfig?.auth?.allowedEmailDomains ?? [])
+  )
+    .map((value) => value.trim().toLowerCase().replace(/^@/, ""))
+    .filter((value) => value.length > 0);
   const allowedHostnamesFromEnvRaw = process.env.PAPERCLIP_ALLOWED_HOSTNAMES;
   const allowedHostnamesFromEnv = allowedHostnamesFromEnvRaw
     ? allowedHostnamesFromEnvRaw
@@ -296,6 +305,7 @@ export function loadConfig(): Config {
     authBaseUrlMode,
     authPublicBaseUrl,
     authDisableSignUp,
+    authAllowedEmailDomains,
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
