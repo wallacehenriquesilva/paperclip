@@ -638,6 +638,34 @@
       "when": 1779468600000,
       "tag": "0090_mcp_oauth_dcr",
       "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1780338561292,
+      "tag": "0091_lethal_marvel_apes",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1780426345844,
+      "tag": "0092_amazing_mastermind",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1782691719693,
+      "tag": "0093_absurd_bloodaxe",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1782701664621,
+      "tag": "0094_public_argent",
+      "breakpoints": true
     }
   ]
 }

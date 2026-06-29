@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Shield, ShieldCheck } from "lucide-react";
 import { accessApi } from "@/api/access";
 import { ApiError } from "@/api/client";
+import { InstanceApiKeysSection } from "@/components/InstanceApiKeysSection";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
@@ -29,6 +30,11 @@ export function InstanceAccess() {
   const usersQuery = useQuery({
     queryKey: queryKeys.access.adminUsers(search),
     queryFn: () => accessApi.searchAdminUsers(search),
+  });
+
+  const currentAccessQuery = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
   });
 
   const selectedUser = useMemo(
@@ -82,6 +88,31 @@ export function InstanceAccess() {
       pushToast({ title: "Instance role updated", tone: "success" });
     },
   });
+
+  const deactivateMutation = useMutation({
+    mutationFn: async (deactivate: boolean) => {
+      if (!selectedUserId) throw new Error("No user selected");
+      return deactivate
+        ? accessApi.deactivateUser(selectedUserId)
+        : accessApi.reactivateUser(selectedUserId);
+    },
+    onSuccess: async (_result, deactivate) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.access.adminUsers(search) });
+      pushToast({
+        title: deactivate ? "User deactivated" : "User reactivated",
+        tone: "success",
+      });
+    },
+    onError: (error) => {
+      pushToast({
+        title: error instanceof Error ? error.message : "Failed to update user",
+        tone: "error",
+      });
+    },
+  });
+
+  const isSelf = currentAccessQuery.data?.userId === selectedUserId;
+  const isDeactivated = Boolean(selectedUser?.deactivatedAt);
 
   if (usersQuery.isLoading) {
     return <div className="text-sm text-muted-foreground">Loading instance users…</div>;
@@ -141,8 +172,13 @@ export function InstanceAccess() {
                     <ShieldCheck className="h-4 w-4 text-emerald-600" />
                   ) : null}
                 </div>
-                <div className="mt-2 text-xs text-muted-foreground">
-                  {user.activeCompanyMembershipCount} active company memberships
+                <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>{user.activeCompanyMembershipCount} active company memberships</span>
+                  {user.deactivatedAt ? (
+                    <span className="rounded-full bg-destructive/10 px-2 py-0.5 font-medium text-destructive">
+                      Deactivated
+                    </span>
+                  ) : null}
                 </div>
               </button>
             ))}
@@ -169,14 +205,41 @@ export function InstanceAccess() {
                     {selectedUser?.email || selectedUserId}
                   </div>
                 </div>
-                <Button
-                  variant={selectedUser?.isInstanceAdmin ? "outline" : "default"}
-                  onClick={() => setAdminMutation.mutate(!(selectedUser?.isInstanceAdmin ?? false))}
-                  disabled={setAdminMutation.isPending}
-                >
-                  {selectedUser?.isInstanceAdmin ? "Remove instance admin" : "Promote to instance admin"}
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant={selectedUser?.isInstanceAdmin ? "outline" : "default"}
+                    onClick={() => setAdminMutation.mutate(!(selectedUser?.isInstanceAdmin ?? false))}
+                    disabled={setAdminMutation.isPending}
+                  >
+                    {selectedUser?.isInstanceAdmin ? "Remove instance admin" : "Promote to instance admin"}
+                  </Button>
+                  <Button
+                    variant={isDeactivated ? "outline" : "destructive"}
+                    disabled={deactivateMutation.isPending || isSelf}
+                    title={isSelf ? "You cannot deactivate your own account" : undefined}
+                    onClick={() => {
+                      if (isDeactivated) {
+                        deactivateMutation.mutate(false);
+                        return;
+                      }
+                      if (
+                        window.confirm(
+                          `Deactivate ${selectedUser?.name || selectedUser?.email || "this user"}? They will be signed out and blocked from accessing the platform. You can reactivate them later.`,
+                        )
+                      ) {
+                        deactivateMutation.mutate(true);
+                      }
+                    }}
+                  >
+                    {isDeactivated ? "Reactivate user" : "Deactivate user"}
+                  </Button>
+                </div>
               </div>
+              {isDeactivated ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  This user is deactivated and cannot access the platform.
+                </div>
+              ) : null}
 
               <div className="space-y-3">
                 <div>
@@ -244,6 +307,8 @@ export function InstanceAccess() {
           )}
         </section>
       </div>
+
+      <InstanceApiKeysSection />
     </div>
   );
 }

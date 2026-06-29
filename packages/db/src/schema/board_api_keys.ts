@@ -8,6 +8,9 @@ export const boardApiKeys = pgTable(
     userId: text("user_id").notNull().references(() => authUsers.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     keyHash: text("key_hash").notNull(),
+    // Non-secret display hint (last chars of the plaintext token). Lets the
+    // instance API-key manager render a masked preview without storing the key.
+    keySuffix: text("key_suffix"),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),

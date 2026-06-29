@@ -52,6 +52,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { User, Hexagon, ArrowUpRight, Tag, Plus, GitBranch, FolderOpen, Check, ExternalLink, X, Clock, RotateCcw, Loader2, CheckCircle2 } from "lucide-react";
 import { AgentIcon } from "./AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
+import { IssueMetadataPanel } from "./IssueMetadataPanel";
 
 function TruncatedCopyable({ value, icon: Icon }: { value: string; icon: React.ComponentType<{ className?: string }> }) {
   const [copied, setCopied] = useState(false);
@@ -2043,6 +2044,10 @@ export function IssueProperties({
           </div>
         </>
       ) : null}
+
+      <Separator />
+
+      <IssueMetadataPanel metadata={issue.metadata} onUpdate={onUpdate} />
 
       <Separator />
 

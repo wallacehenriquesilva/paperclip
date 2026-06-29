@@ -5,6 +5,7 @@ import {
   buildBetterAuthAdvancedOptions,
   deriveAuthCookiePrefix,
   deriveAuthTrustedOrigins,
+  isEmailDomainAllowed,
 } from "../auth/better-auth.js";
 
 const ORIGINAL_INSTANCE_ID = process.env.PAPERCLIP_INSTANCE_ID;
@@ -74,5 +75,44 @@ describe("Better Auth cookie scoping", () => {
     ]));
     expect(trustedOrigins).not.toContain("https://board.example.test:3100");
     expect(trustedOrigins).not.toContain("http://board.example.test:3100");
+  });
+});
+
+describe("email-domain allowlist gate", () => {
+  it("allows any domain when the allowlist is empty", () => {
+    expect(isEmailDomainAllowed("anyone@anywhere.com", [])).toBe(true);
+  });
+
+  it("allows a domain present in the allowlist", () => {
+    expect(isEmailDomainAllowed("user@contaazul.com", ["contaazul.com"])).toBe(true);
+  });
+
+  it("rejects a domain absent from the allowlist", () => {
+    expect(isEmailDomainAllowed("user@gmail.com", ["contaazul.com"])).toBe(false);
+  });
+
+  it("matches case-insensitively on both sides", () => {
+    expect(isEmailDomainAllowed("User@ContaAzul.COM", ["CONTAAZUL.com"])).toBe(true);
+  });
+
+  it("tolerates a leading @ and surrounding whitespace in the allowlist", () => {
+    expect(isEmailDomainAllowed("user@contaazul.com", [" @contaazul.com "])).toBe(true);
+  });
+
+  it("treats an allowlist of only blank entries as no restriction", () => {
+    expect(isEmailDomainAllowed("user@gmail.com", ["  ", ""])).toBe(true);
+  });
+
+  it("does not match a subdomain against a bare domain entry", () => {
+    expect(isEmailDomainAllowed("user@mail.contaazul.com", ["contaazul.com"])).toBe(false);
+  });
+
+  it("rejects malformed emails without a domain", () => {
+    expect(isEmailDomainAllowed("not-an-email", ["contaazul.com"])).toBe(false);
+    expect(isEmailDomainAllowed("user@", ["contaazul.com"])).toBe(false);
+  });
+
+  it("matches against the last @ segment", () => {
+    expect(isEmailDomainAllowed("weird@local@contaazul.com", ["contaazul.com"])).toBe(true);
   });
 });

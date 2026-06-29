@@ -3,6 +3,7 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, ne, not, or, sql }
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  companies,
   companySecretBindings,
   companySecretVersions,
   companySecrets,
@@ -23,6 +24,7 @@ import {
 import type {
   CreateRoutine,
   CreateRoutineTrigger,
+  QuietHoursConfig,
   Routine,
   RoutineDetail,
   RoutineListItem,
@@ -56,6 +58,7 @@ import { issueService } from "./issues.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { parseCron, validateCron } from "./cron.js";
+import { isQuietHoursActive, nextQuietHoursEnd } from "./quiet-hours.js";
 import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
@@ -2656,6 +2659,21 @@ export function routineService(
         )
         .orderBy(asc(routineTriggers.nextRunAt), asc(routineTriggers.createdAt));
 
+      // Cache each company's quiet-hours config for the duration of the tick so
+      // we don't re-query it once per due trigger.
+      const quietHoursByCompany = new Map<string, QuietHoursConfig | null>();
+      const getCompanyQuietHours = async (companyId: string): Promise<QuietHoursConfig | null> => {
+        if (quietHoursByCompany.has(companyId)) return quietHoursByCompany.get(companyId) ?? null;
+        const companyRow = await db
+          .select({ quietHours: companies.quietHours })
+          .from(companies)
+          .where(eq(companies.id, companyId))
+          .then((rows) => rows[0] ?? null);
+        const quietHours = companyRow?.quietHours ?? null;
+        quietHoursByCompany.set(companyId, quietHours);
+        return quietHours;
+      };
+
       let triggered = 0;
       for (const row of due) {
         if (!row.trigger.nextRunAt || !row.trigger.cronExpression || !row.trigger.timezone) continue;
@@ -2670,6 +2688,20 @@ export function routineService(
             runCount += 1;
             claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, cursor);
             cursor = claimedNextRunAt;
+          }
+        }
+
+        // Quiet hours: do not start scheduled routine runs inside an active window.
+        // `defer` reschedules this occurrence to the moment the window closes so
+        // nothing is lost; `skip` lets the normal cron advance, dropping the
+        // occurrence that fell inside the window. Either way we still claim the
+        // trigger (advancing nextRunAt) but do not dispatch.
+        let suppressedByQuietHours = false;
+        const quietHours = await getCompanyQuietHours(row.routine.companyId);
+        if (isQuietHoursActive(quietHours, now)) {
+          suppressedByQuietHours = true;
+          if (quietHours?.onBlock === "defer") {
+            claimedNextRunAt = nextQuietHoursEnd(quietHours, now) ?? claimedNextRunAt;
           }
         }
 
@@ -2689,6 +2721,7 @@ export function routineService(
           .returning({ id: routineTriggers.id })
           .then((rows) => rows[0] ?? null);
         if (!claimed) continue;
+        if (suppressedByQuietHours) continue;
 
         for (let i = 0; i < runCount; i += 1) {
           await dispatchRoutineRun({

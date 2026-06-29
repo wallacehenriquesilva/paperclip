@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   agentRuntimeState,
@@ -309,6 +309,242 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       .where(eq(heartbeatRuns.id, scheduled.run.id))
       .then((rows) => rows[0] ?? null);
     expect(promotedRun?.status).toBe("queued");
+  });
+
+  it("clamps a transient retry due time to the end of an active quiet-hours window", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const sourceRunId = randomUUID();
+    const now = new Date("2026-04-20T12:00:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      quietHours: {
+        enabled: true,
+        timezone: "UTC",
+        windows: [{ days: [], start: "10:00", end: "17:00" }],
+        onBlock: "skip",
+      },
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: sourceRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "failed",
+      error: "upstream overload",
+      errorCode: "adapter_failed",
+      finishedAt: now,
+      contextSnapshot: { issueId: randomUUID(), wakeReason: "issue_assigned" },
+      updatedAt: now,
+      createdAt: now,
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(sourceRunId, {
+      now,
+      random: () => 0.5,
+    });
+
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+
+    // The natural backoff would land at 12:00 + backoff (still inside 10:00–17:00),
+    // so it must be pushed to the window's close instead.
+    expect(scheduled.dueAt.toISOString()).toBe("2026-04-20T17:00:00.000Z");
+
+    const retryRun = await db
+      .select({ scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scheduled.run.id))
+      .then((rows) => rows[0] ?? null);
+    expect(retryRun?.scheduledRetryAt?.toISOString()).toBe("2026-04-20T17:00:00.000Z");
+  });
+
+  it("defers a due scheduled retry that falls inside a quiet-hours window enabled after scheduling", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const sourceRunId = randomUUID();
+    // Schedule before the window opens so the scheduling clamp does not fire.
+    const now = new Date("2026-04-20T09:00:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: sourceRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "failed",
+      error: "upstream overload",
+      errorCode: "adapter_failed",
+      finishedAt: now,
+      contextSnapshot: { issueId: randomUUID(), wakeReason: "issue_assigned" },
+      updatedAt: now,
+      createdAt: now,
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(sourceRunId, {
+      now,
+      random: () => 0.5,
+    });
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+
+    // Quiet hours are turned on after the retry was already scheduled.
+    await db
+      .update(companies)
+      .set({
+        quietHours: {
+          enabled: true,
+          timezone: "UTC",
+          windows: [{ days: [], start: "10:00", end: "17:00" }],
+          onBlock: "skip",
+        },
+      })
+      .where(eq(companies.id, companyId));
+
+    // Promotion is attempted while inside the window.
+    const promotion = await heartbeat.promoteDueScheduledRetries(
+      new Date("2026-04-20T11:00:00.000Z"),
+    );
+    expect(promotion).toEqual({ promoted: 0, runIds: [] });
+
+    const deferred = await db
+      .select({
+        status: heartbeatRuns.status,
+        scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scheduled.run.id))
+      .then((rows) => rows[0] ?? null);
+    expect(deferred?.status).toBe("scheduled_retry");
+    expect(deferred?.scheduledRetryAt?.toISOString()).toBe("2026-04-20T17:00:00.000Z");
+
+    // Once the window closes, the same retry promotes normally.
+    const afterWindow = await heartbeat.promoteDueScheduledRetries(
+      new Date("2026-04-20T17:00:00.000Z"),
+    );
+    expect(afterWindow).toEqual({ promoted: 1, runIds: [scheduled.run.id] });
+  });
+
+  it("suppresses autonomous wakes inside a quiet-hours window but lets on-demand through", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const now = new Date("2026-04-20T12:00:00.000Z");
+
+    // Pin the wall clock inside a 10:00–17:00 UTC quiet window. The wake gate
+    // reads `new Date()` directly, so faking only Date keeps the check
+    // deterministic without stubbing the timers the DB layer relies on.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+        quietHours: {
+          enabled: true,
+          timezone: "UTC",
+          windows: [{ days: [], start: "10:00", end: "17:00" }],
+          onBlock: "skip",
+        },
+      });
+
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "CodexCoder",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+        permissions: {},
+      });
+
+      // Fill the single concurrency slot so an admitted wake stays queued rather
+      // than executing the adapter inside this unit test.
+      await db.insert(heartbeatRuns).values(
+        Array.from({ length: 3 }, () => ({
+          id: randomUUID(),
+          companyId,
+          agentId,
+          invocationSource: "automation" as const,
+          triggerDetail: "system",
+          status: "running" as const,
+          contextSnapshot: { wakeReason: "test_busy_slot" },
+          startedAt: now,
+          updatedAt: now,
+          createdAt: now,
+        })),
+      );
+
+      const assignmentRun = await heartbeat.wakeup(agentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+      });
+      expect(assignmentRun).toBeNull();
+
+      const automationRun = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "recovery_dispatch",
+      });
+      expect(automationRun).toBeNull();
+
+      const onDemandRun = await heartbeat.wakeup(agentId, {
+        source: "on_demand",
+        triggerDetail: "manual",
+        reason: "manual_run_now",
+        requestedByActorType: "user",
+        requestedByActorId: "local-board",
+      });
+      expect(onDemandRun).not.toBeNull();
+
+      const requests = await db
+        .select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason, source: agentWakeupRequests.source })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.companyId, companyId));
+      const quietSkips = requests.filter((r) => r.status === "skipped" && r.reason === "quiet_hours");
+      expect(quietSkips.map((r) => r.source).sort()).toEqual(["assignment", "automation"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("schedules max-turn continuations with distinct retry metadata", async () => {

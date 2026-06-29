@@ -3,6 +3,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
+import { APIError } from "better-auth/api";
 import type { Db } from "@paperclipai/db";
 import {
   authAccounts,
@@ -43,6 +44,38 @@ export function buildBetterAuthAdvancedOptions(input: { disableSecureCookies: bo
     ...(input.disableSecureCookies ? { useSecureCookies: false } : {}),
   };
 }
+
+export const EMAIL_DOMAIN_NOT_ALLOWED_CODE = "EMAIL_DOMAIN_NOT_ALLOWED";
+
+/**
+ * Generic rejection message for a disallowed email domain. We deliberately do
+ * NOT name the permitted domains: revealing the allowlist would let anyone
+ * enumerate the accepted domains and simply retry with one, defeating the gate.
+ */
+export const EMAIL_DOMAIN_NOT_ALLOWED_MESSAGE =
+  "This email address can't be used to sign up.";
+
+/**
+ * Returns true when `email`'s domain is permitted by the allowlist.
+ * An empty allowlist means "no restriction" — every domain is allowed, which
+ * is the default behavior. `allowedDomains` is expected to arrive pre-normalized
+ * from config loading (lowercased, leading "@" stripped), but we normalize
+ * defensively so the helper is safe to call with raw values too.
+ */
+export function isEmailDomainAllowed(email: string, allowedDomains: readonly string[]): boolean {
+  const normalizedAllowlist = allowedDomains
+    .map((domain) => domain.trim().toLowerCase().replace(/^@/, ""))
+    .filter((domain) => domain.length > 0);
+  if (normalizedAllowlist.length === 0) return true;
+
+  const atIndex = email.lastIndexOf("@");
+  if (atIndex === -1) return false;
+  const domain = email.slice(atIndex + 1).trim().toLowerCase();
+  if (!domain) return false;
+
+  return normalizedAllowlist.includes(domain);
+}
+
 
 function headersFromNodeHeaders(rawHeaders: IncomingHttpHeaders): Headers {
   const headers = new Headers();
@@ -119,6 +152,23 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       enabled: true,
       requireEmailVerification: false,
       disableSignUp: config.authDisableSignUp,
+    },
+    databaseHooks: {
+      user: {
+        create: {
+          // Gate every account creation on the email-domain allowlist. With an
+          // empty allowlist this is a no-op (all domains allowed). Throwing an
+          // APIError aborts the sign-up and surfaces the message to the client.
+          before: async (user: { email: string }) => {
+            if (!isEmailDomainAllowed(user.email, config.authAllowedEmailDomains)) {
+              throw new APIError("FORBIDDEN", {
+                code: EMAIL_DOMAIN_NOT_ALLOWED_CODE,
+                message: EMAIL_DOMAIN_NOT_ALLOWED_MESSAGE,
+              });
+            }
+          },
+        },
+      },
     },
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies: isHttpOnly }),
   };

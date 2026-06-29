@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   authUsers,
@@ -9,10 +9,48 @@ import {
   companyMemberships,
   instanceUserRoles,
 } from "@paperclipai/db";
+import type {
+  BoardApiKeyExpiration,
+  BoardApiKeyListItem,
+  BoardApiKeyStatus,
+} from "@paperclipai/shared";
 import { conflict, forbidden, notFound } from "../errors.js";
 
 export const BOARD_API_KEY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const CLI_AUTH_CHALLENGE_TTL_MS = 10 * 60 * 1000;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Expiration option (from the key manager) → lifetime in ms (null = never). */
+export const BOARD_API_KEY_EXPIRATION_MS: Record<BoardApiKeyExpiration, number | null> = {
+  "1d": DAY_MS,
+  "7d": 7 * DAY_MS,
+  "15d": 15 * DAY_MS,
+  "30d": 30 * DAY_MS,
+  never: null,
+};
+
+export function resolveBoardApiKeyExpiresAt(
+  expiration: BoardApiKeyExpiration,
+  nowMs: number = Date.now(),
+): Date | null {
+  const lifetime = BOARD_API_KEY_EXPIRATION_MS[expiration];
+  return lifetime === null ? null : new Date(nowMs + lifetime);
+}
+
+/** Builds the non-secret masked preview shown in the key manager. */
+export function boardApiKeyMaskedValue(suffix: string | null | undefined): string {
+  return suffix ? `pcp_board_••••${suffix}` : "pcp_board_••••";
+}
+
+export function boardApiKeyStatusForRow(row: {
+  revokedAt: Date | null;
+  expiresAt: Date | null;
+}): BoardApiKeyStatus {
+  if (row.revokedAt) return "revoked";
+  if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) return "expired";
+  return "active";
+}
 
 export type CliAuthChallengeStatus = "pending" | "approved" | "cancelled" | "expired";
 
@@ -57,6 +95,7 @@ export function boardAuthService(db: Db) {
           id: authUsers.id,
           name: authUsers.name,
           email: authUsers.email,
+          deactivatedAt: authUsers.deactivatedAt,
         })
         .from(authUsers)
         .where(eq(authUsers.id, userId))
@@ -83,11 +122,15 @@ export function boardAuthService(db: Db) {
         .then((rows) => rows[0] ?? null),
     ]);
 
+    // Deactivated (soft-deleted) users have no access: drop the user so board
+    // API keys and CLI-auth flows resolve as unauthenticated.
+    const activeUser = user && !user.deactivatedAt ? user : null;
+
     return {
-      user,
-      companyIds: memberships.map((row) => row.companyId),
-      memberships,
-      isInstanceAdmin: Boolean(adminRole),
+      user: activeUser,
+      companyIds: activeUser ? memberships.map((row) => row.companyId) : [],
+      memberships: activeUser ? memberships : [],
+      isInstanceAdmin: activeUser ? Boolean(adminRole) : false,
     };
   }
 
@@ -332,6 +375,78 @@ export function boardAuthService(db: Db) {
     return { status: "cancelled" as const, challenge: updated };
   }
 
+  async function createManagedBoardApiKey(input: {
+    userId: string;
+    name: string;
+    expiration: BoardApiKeyExpiration;
+  }) {
+    const token = createBoardApiToken();
+    const keyHash = hashBearerToken(token);
+    const keySuffix = token.slice(-4);
+    const expiresAt = resolveBoardApiKeyExpiresAt(input.expiration);
+    const created = await db
+      .insert(boardApiKeys)
+      .values({
+        userId: input.userId,
+        name: input.name,
+        keyHash,
+        keySuffix,
+        expiresAt,
+      })
+      .returning()
+      .then((rows) => rows[0]);
+
+    return {
+      id: created.id,
+      name: created.name,
+      token,
+      maskedKey: boardApiKeyMaskedValue(created.keySuffix),
+      expiresAt: created.expiresAt?.toISOString() ?? null,
+      createdAt: created.createdAt.toISOString(),
+    };
+  }
+
+  async function listManagedBoardApiKeys(): Promise<BoardApiKeyListItem[]> {
+    const rows = await db
+      .select({
+        id: boardApiKeys.id,
+        name: boardApiKeys.name,
+        keySuffix: boardApiKeys.keySuffix,
+        lastUsedAt: boardApiKeys.lastUsedAt,
+        revokedAt: boardApiKeys.revokedAt,
+        expiresAt: boardApiKeys.expiresAt,
+        createdAt: boardApiKeys.createdAt,
+        ownerId: authUsers.id,
+        ownerName: authUsers.name,
+        ownerEmail: authUsers.email,
+      })
+      .from(boardApiKeys)
+      .leftJoin(authUsers, eq(boardApiKeys.userId, authUsers.id))
+      .orderBy(desc(boardApiKeys.createdAt));
+
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      maskedKey: boardApiKeyMaskedValue(row.keySuffix),
+      status: boardApiKeyStatusForRow(row),
+      owner: row.ownerId
+        ? { id: row.ownerId, name: row.ownerName ?? null, email: row.ownerEmail ?? null }
+        : null,
+      lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+      expiresAt: row.expiresAt?.toISOString() ?? null,
+      revokedAt: row.revokedAt?.toISOString() ?? null,
+      createdAt: row.createdAt.toISOString(),
+    }));
+  }
+
+  async function getBoardApiKeyById(id: string) {
+    return db
+      .select()
+      .from(boardApiKeys)
+      .where(eq(boardApiKeys.id, id))
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function assertCurrentBoardKey(keyId: string | undefined, userId: string | undefined) {
     if (!keyId || !userId) throw conflict("Board API key context is required");
     const key = await db
@@ -355,5 +470,8 @@ export function boardAuthService(db: Db) {
     cancelCliAuthChallenge,
     assertCurrentBoardKey,
     resolveBoardActivityCompanyIds,
+    createManagedBoardApiKey,
+    listManagedBoardApiKeys,
+    getBoardApiKeyById,
   };
 }

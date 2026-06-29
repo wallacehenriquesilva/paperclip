@@ -457,6 +457,7 @@ export interface Issue {
   originFingerprint?: string | null;
   requestDepth: number;
   billingCode: string | null;
+  metadata?: Record<string, unknown> | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
   executionPolicy?: IssueExecutionPolicy | null;
   executionState?: IssueExecutionState | null;

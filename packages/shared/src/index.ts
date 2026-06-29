@@ -134,6 +134,8 @@ export {
   PLUGIN_EVENT_TYPES,
   PLUGIN_BRIDGE_ERROR_CODES,
   type CompanyStatus,
+  QUIET_HOURS_ON_BLOCK_MODES,
+  type QuietHoursOnBlock,
   type DeploymentMode,
   type DeploymentExposure,
   type BindMode,
@@ -262,6 +264,8 @@ export {
 
 export type {
   Company,
+  QuietHoursConfig,
+  QuietHoursWindow,
   Environment,
   EnvironmentLease,
   EnvironmentProbeResult,
@@ -658,6 +662,10 @@ export type {
   PluginWebhookDeliveryRecord,
   QuotaWindow,
   ProviderQuotaResult,
+  BoardApiKeyStatus,
+  BoardApiKeyOwner,
+  BoardApiKeyListItem,
+  BoardApiKeyCreated,
 } from "./types/index.js";
 export { COMPANY_SEARCH_SCOPES } from "./types/index.js";
 export {
@@ -725,6 +733,8 @@ export {
   createCompanySchema,
   updateCompanySchema,
   updateCompanyBrandingSchema,
+  quietHoursWindowSchema,
+  quietHoursConfigSchema,
   feedbackTargetTypeSchema,
   feedbackTraceStatusSchema,
   feedbackVoteValueSchema,
@@ -732,6 +742,7 @@ export {
   type CreateCompany,
   type UpdateCompany,
   type UpdateCompanyBranding,
+  type QuietHoursConfigInput,
   type UpsertIssueFeedbackVote,
   environmentDriverSchema,
   environmentStatusSchema,
@@ -962,6 +973,8 @@ export {
   boardCliAuthAccessLevelSchema,
   createCliAuthChallengeSchema,
   resolveCliAuthChallengeSchema,
+  boardApiKeyExpirationSchema,
+  createBoardApiKeySchema,
   currentUserProfileSchema,
   authSessionSchema,
   updateCurrentUserProfileSchema,
@@ -984,6 +997,8 @@ export {
   type BoardCliAuthAccessLevel,
   type CreateCliAuthChallenge,
   type ResolveCliAuthChallenge,
+  type BoardApiKeyExpiration,
+  type CreateBoardApiKey,
   type CurrentUserProfile,
   type AuthSession,
   type UpdateCurrentUserProfile,
