@@ -30,6 +30,7 @@ import {
 } from "@paperclipai/db";
 import {
   acceptInviteSchema,
+  createBoardApiKeySchema,
   createCliAuthChallengeSchema,
   claimJoinRequestApiKeySchema,
   createCompanyInviteSchema,
@@ -4324,6 +4325,7 @@ export function accessRoutes(
         email: authUsers.email,
         name: authUsers.name,
         image: authUsers.image,
+        deactivatedAt: authUsers.deactivatedAt,
       })
       .from(authUsers)
       .orderBy(desc(authUsers.updatedAt));
@@ -4368,6 +4370,7 @@ export function accessRoutes(
       filteredUsers.slice(0, 50).map((user) => ({
         ...toUserProfile(user),
         isInstanceAdmin: adminIds.has(user.id),
+        deactivatedAt: user.deactivatedAt ? user.deactivatedAt.toISOString() : null,
         activeCompanyMembershipCount:
           membershipCountByUserId.get(user.id) ?? 0,
       })),
@@ -4382,6 +4385,31 @@ export function accessRoutes(
       const removed = await access.demoteInstanceAdmin(userId);
       if (!removed) throw notFound("Instance admin role not found");
       res.json(removed);
+    }
+  );
+
+  router.post(
+    "/admin/users/:userId/deactivate",
+    async (req, res) => {
+      await assertInstanceAdmin(req);
+      const userId = req.params.userId as string;
+      if (req.actor.type === "board" && req.actor.userId === userId) {
+        throw conflict("You cannot deactivate your own account.");
+      }
+      const updated = await access.deactivateUser(userId);
+      if (!updated) throw notFound("User not found");
+      res.json({ id: updated.id, deactivatedAt: updated.deactivatedAt });
+    }
+  );
+
+  router.post(
+    "/admin/users/:userId/reactivate",
+    async (req, res) => {
+      await assertInstanceAdmin(req);
+      const userId = req.params.userId as string;
+      const updated = await access.reactivateUser(userId);
+      if (!updated) throw notFound("User not found");
+      res.json({ id: updated.id, deactivatedAt: updated.deactivatedAt });
     }
   );
 
@@ -4405,6 +4433,43 @@ export function accessRoutes(
       res.json(await loadUserCompanyAccessResponse(db, access, userId));
     }
   );
+
+  router.get("/admin/board-api-keys", async (req, res) => {
+    await assertInstanceAdmin(req);
+    res.json(await boardAuth.listManagedBoardApiKeys());
+  });
+
+  router.post(
+    "/admin/board-api-keys",
+    validate(createBoardApiKeySchema),
+    async (req, res) => {
+      await assertInstanceAdmin(req);
+      const userId = req.actor.userId ?? null;
+      if (!userId) {
+        throw badRequest("A signed-in board user is required to create an API key.");
+      }
+      const created = await boardAuth.createManagedBoardApiKey({
+        userId,
+        name: req.body.name,
+        expiration: req.body.expiration,
+      });
+      res.status(201).json(created);
+    }
+  );
+
+  router.delete("/admin/board-api-keys/:keyId", async (req, res) => {
+    await assertInstanceAdmin(req);
+    const keyId = req.params.keyId as string;
+    const existing = await boardAuth.getBoardApiKeyById(keyId);
+    if (!existing) {
+      throw notFound("Board API key not found");
+    }
+    const revoked = await boardAuth.revokeBoardApiKey(keyId);
+    if (!revoked) {
+      throw notFound("Board API key not found");
+    }
+    res.json({ ok: true });
+  });
 
   return router;
 }

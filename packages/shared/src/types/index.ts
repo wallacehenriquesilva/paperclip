@@ -1,4 +1,4 @@
-export type { Company } from "./company.js";
+export type { Company, QuietHoursConfig, QuietHoursWindow } from "./company.js";
 export type {
   Environment,
   EnvironmentLease,
@@ -258,6 +258,12 @@ export type {
   IssueTreePreviewWarning,
 } from "./issue-tree-control.js";
 export type { Goal } from "./goal.js";
+export type {
+  BoardApiKeyStatus,
+  BoardApiKeyOwner,
+  BoardApiKeyListItem,
+  BoardApiKeyCreated,
+} from "./board-api-key.js";
 export type { Approval, ApprovalComment } from "./approval.js";
 export type {
   BudgetPolicy,

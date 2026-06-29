@@ -85,6 +85,23 @@ export const resolveCliAuthChallengeSchema = z.object({
 
 export type ResolveCliAuthChallenge = z.infer<typeof resolveCliAuthChallengeSchema>;
 
+export const boardApiKeyExpirationSchema = z.enum([
+  "1d",
+  "7d",
+  "15d",
+  "30d",
+  "never",
+]);
+
+export type BoardApiKeyExpiration = z.infer<typeof boardApiKeyExpirationSchema>;
+
+export const createBoardApiKeySchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  expiration: boardApiKeyExpirationSchema,
+});
+
+export type CreateBoardApiKey = z.infer<typeof createBoardApiKeySchema>;
+
 export const updateMemberPermissionsSchema = z.object({
   grants: z.array(
     z.object({

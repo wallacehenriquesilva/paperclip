@@ -2,6 +2,8 @@ import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  authSessions,
+  authUsers,
   companyMemberships,
   instanceUserRoles,
   issues,
@@ -443,6 +445,43 @@ export function accessService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
+  /**
+   * Soft-deletes a user: stamps `deactivatedAt` and drops all of their auth
+   * sessions so the block takes effect immediately. Memberships and roles are
+   * left intact so the action is fully reversible via {@link reactivateUser}.
+   */
+  async function deactivateUser(userId: string) {
+    return db.transaction(async (tx) => {
+      const user = await tx
+        .select()
+        .from(authUsers)
+        .where(eq(authUsers.id, userId))
+        .then((rows) => rows[0] ?? null);
+      if (!user) return null;
+
+      const updated = user.deactivatedAt
+        ? user
+        : await tx
+            .update(authUsers)
+            .set({ deactivatedAt: new Date(), updatedAt: new Date() })
+            .where(eq(authUsers.id, userId))
+            .returning()
+            .then((rows) => rows[0] ?? user);
+
+      await tx.delete(authSessions).where(eq(authSessions.userId, userId));
+      return updated;
+    });
+  }
+
+  async function reactivateUser(userId: string) {
+    return db
+      .update(authUsers)
+      .set({ deactivatedAt: null, updatedAt: new Date() })
+      .where(eq(authUsers.id, userId))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function listUserCompanyAccess(userId: string) {
     return db
       .select()
@@ -781,6 +820,8 @@ export function accessService(db: Db) {
     updateMemberAndPermissions,
     promoteInstanceAdmin,
     demoteInstanceAdmin,
+    deactivateUser,
+    reactivateUser,
     listUserCompanyAccess,
     setUserCompanyAccess,
     setPrincipalGrants,

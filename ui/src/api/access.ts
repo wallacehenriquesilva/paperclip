@@ -1,4 +1,11 @@
-import type { AgentAdapterType, JoinRequest, PermissionKey } from "@paperclipai/shared";
+import type {
+  AgentAdapterType,
+  BoardApiKeyCreated,
+  BoardApiKeyExpiration,
+  BoardApiKeyListItem,
+  JoinRequest,
+  PermissionKey,
+} from "@paperclipai/shared";
 import { api } from "./client";
 
 export type HumanCompanyRole = "owner" | "admin" | "operator" | "viewer";
@@ -206,6 +213,7 @@ export type AdminUserDirectoryEntry = {
   name: string | null;
   image: string | null;
   isInstanceAdmin: boolean;
+  deactivatedAt: string | null;
   activeCompanyMembershipCount: number;
 };
 
@@ -405,6 +413,12 @@ export const accessApi = {
   demoteInstanceAdmin: (userId: string) =>
     api.post(`/admin/users/${userId}/demote-instance-admin`, {}),
 
+  deactivateUser: (userId: string) =>
+    api.post<{ id: string; deactivatedAt: string | null }>(`/admin/users/${userId}/deactivate`, {}),
+
+  reactivateUser: (userId: string) =>
+    api.post<{ id: string; deactivatedAt: string | null }>(`/admin/users/${userId}/reactivate`, {}),
+
   getUserCompanyAccess: (userId: string) =>
     api.get<UserCompanyAccessResponse>(`/admin/users/${userId}/company-access`),
 
@@ -413,4 +427,13 @@ export const accessApi = {
 
   getCurrentBoardAccess: () =>
     api.get<CurrentBoardAccess>("/cli-auth/me"),
+
+  listBoardApiKeys: () =>
+    api.get<BoardApiKeyListItem[]>("/admin/board-api-keys"),
+
+  createBoardApiKey: (input: { name: string; expiration: BoardApiKeyExpiration }) =>
+    api.post<BoardApiKeyCreated>("/admin/board-api-keys", input),
+
+  revokeBoardApiKey: (keyId: string) =>
+    api.delete<{ ok: true }>(`/admin/board-api-keys/${keyId}`),
 };

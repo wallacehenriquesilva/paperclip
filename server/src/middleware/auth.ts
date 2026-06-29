@@ -59,7 +59,12 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         }
         if (session?.user?.id) {
           const userId = session.user.id;
-          const [roleRow, memberships] = await Promise.all([
+          const [userRow, roleRow, memberships] = await Promise.all([
+            db
+              .select({ deactivatedAt: authUsers.deactivatedAt })
+              .from(authUsers)
+              .where(eq(authUsers.id, userId))
+              .then((rows) => rows[0] ?? null),
             db
               .select({ id: instanceUserRoles.id })
               .from(instanceUserRoles)
@@ -80,6 +85,12 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
                 ),
               ),
           ]);
+          // Soft-deleted user: reject the session, leaving the actor as `none`.
+          if (userRow?.deactivatedAt) {
+            if (runIdHeader) req.actor.runId = runIdHeader;
+            next();
+            return;
+          }
           req.actor = {
             type: "board",
             userId,
