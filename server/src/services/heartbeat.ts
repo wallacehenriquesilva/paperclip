@@ -27,6 +27,7 @@ import {
   agentWakeupRequests,
   activityLog,
   approvals,
+  companies,
   companySkills as companySkillsTable,
   documentRevisions,
   issueDocuments,
@@ -57,6 +58,7 @@ import type {
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { isQuietHoursActive, nextQuietHoursEnd } from "./quiet-hours.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
@@ -5060,6 +5062,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return cancelled;
   }
 
+  async function loadCompanyQuietHours(companyId: string) {
+    const row = await db
+      .select({ quietHours: companies.quietHours })
+      .from(companies)
+      .where(eq(companies.id, companyId))
+      .then((rows) => rows[0] ?? null);
+    return row?.quietHours ?? null;
+  }
+
   async function promoteScheduledRetryRun(
     dueRun: typeof heartbeatRuns.$inferSelect,
     now: Date,
@@ -5118,6 +5129,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               errorCode: gate.errorCode,
             }
           : { outcome: "not_promoted", run: null };
+      }
+    }
+
+    // Quiet hours: a scheduled retry is one-shot recovery of a specific failure,
+    // not a recurring cadence, so we never drop it — we defer the due time to the
+    // end of the active window. This is intentionally independent of the company's
+    // defer/skip preference (that toggle governs recurring occurrences like timer
+    // ticks and routines; skipping a retry would strand the task forever).
+    const quietHours = await loadCompanyQuietHours(dueRun.companyId);
+    if (isQuietHoursActive(quietHours, now)) {
+      const resumeAt = nextQuietHoursEnd(quietHours, now);
+      if (resumeAt) {
+        const deferred = await db
+          .update(heartbeatRuns)
+          .set({
+            scheduledRetryAt: resumeAt,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(heartbeatRuns.id, dueRun.id),
+              eq(heartbeatRuns.status, "scheduled_retry"),
+              lte(heartbeatRuns.scheduledRetryAt, now),
+            ),
+          )
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (deferred) {
+          await appendRunEvent(deferred, await nextRunEventSeq(deferred.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "info",
+            message: "Scheduled retry deferred because quiet hours are active",
+            payload: {
+              scheduledRetryAttempt: deferred.scheduledRetryAttempt,
+              scheduledRetryReason: deferred.scheduledRetryReason,
+              resumeAt: resumeAt.toISOString(),
+            },
+          });
+          return { outcome: "not_promoted", run: deferred };
+        }
       }
     }
 
@@ -5223,7 +5275,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         maxAttempts,
       };
     }
-    const schedule =
+    const notBeforeSchedule =
       transientRetryNotBefore && transientRetryNotBefore.getTime() > baseSchedule.dueAt.getTime()
         ? {
             ...baseSchedule,
@@ -5231,6 +5283,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             delayMs: Math.max(0, transientRetryNotBefore.getTime() - now.getTime()),
           }
         : baseSchedule;
+
+    // Quiet hours: if the computed retry instant lands inside an active window,
+    // push it to the window's end so we don't schedule (and display) a retry that
+    // would only be deferred at promotion time. The promotion gate is the safety
+    // net for windows entered or edited after this point.
+    const retryQuietHours = await loadCompanyQuietHours(run.companyId);
+    const schedule = (() => {
+      if (!isQuietHoursActive(retryQuietHours, notBeforeSchedule.dueAt)) return notBeforeSchedule;
+      const resumeAt = nextQuietHoursEnd(retryQuietHours, notBeforeSchedule.dueAt);
+      if (!resumeAt) return notBeforeSchedule;
+      return {
+        ...notBeforeSchedule,
+        dueAt: resumeAt,
+        delayMs: Math.max(0, resumeAt.getTime() - now.getTime()),
+      };
+    })();
 
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
@@ -8830,6 +8898,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (source !== "timer" && !policy.wakeOnDemand) {
       await writeSkippedRequest("heartbeat.wakeOnDemand.disabled");
       return null;
+    }
+
+    // Quiet hours suppress every autonomously initiated wake — timer heartbeats,
+    // assignment pickups, and system automation. Only explicit on-demand wakes
+    // (a human or another agent asking to run now) intentionally bypass the
+    // window, mirroring how a manual action overrides passive scheduling.
+    //
+    // Suppressed wakes are recorded as `skipped` (the audit trail) rather than
+    // re-queued: nothing is stranded because the recurring drivers re-attempt
+    // and naturally resume once the window closes — the timer scheduler re-emits
+    // timer wakes, and the stranded-issue reconcilers re-dispatch assignment
+    // wakes for any assigned issue left without an active run. Scheduled retries
+    // are handled separately at promotion time (they defer rather than drop).
+    if (source !== "on_demand") {
+      const quietHours = await loadCompanyQuietHours(agent.companyId);
+      if (isQuietHoursActive(quietHours, new Date())) {
+        await writeSkippedRequest("quiet_hours");
+        return null;
+      }
     }
 
     if (issueId) {
