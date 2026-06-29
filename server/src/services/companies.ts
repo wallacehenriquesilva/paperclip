@@ -52,6 +52,7 @@ export function companyService(db: Db) {
     feedbackDataSharingConsentByUserId: companies.feedbackDataSharingConsentByUserId,
     feedbackDataSharingTermsVersion: companies.feedbackDataSharingTermsVersion,
     brandColor: companies.brandColor,
+    quietHours: companies.quietHours,
     logoAssetId: companyLogos.assetId,
     createdAt: companies.createdAt,
     updatedAt: companies.updatedAt,

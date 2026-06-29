@@ -13,6 +13,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Settings, Check, Download, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
+import { QuietHoursSettings } from "../components/QuietHoursSettings";
 import {
   Field,
   ToggleField,
@@ -431,6 +432,12 @@ export function CompanySettings() {
           />
         </div>
       </div>
+
+      {/* Quiet hours */}
+      <QuietHoursSettings
+        companyId={selectedCompany.id}
+        quietHours={selectedCompany.quietHours ?? null}
+      />
 
       {/* Invites */}
       <div className="space-y-4" data-testid="company-settings-invites-section">
