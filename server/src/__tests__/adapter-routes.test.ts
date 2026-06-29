@@ -158,13 +158,13 @@ describe("adapter routes", () => {
       requiresMaterializedRuntimeSkills: false,
     });
 
-    // process adapter should have no local capabilities
+    // process adapter has no skill/instruction capabilities but issues a local agent JWT
     const processAdapter = res.body.find((a: any) => a.type === "process");
     expect(processAdapter).toBeDefined();
     expect(processAdapter.capabilities).toMatchObject({
       supportsInstructionsBundle: false,
       supportsSkills: false,
-      supportsLocalAgentJwt: false,
+      supportsLocalAgentJwt: true,
       requiresMaterializedRuntimeSkills: false,
     });
 

@@ -147,6 +147,7 @@ describe("secrets CLI helpers", () => {
       projects: true,
       issues: true,
       skills: false,
+      mcpServers: false,
     });
   });
 

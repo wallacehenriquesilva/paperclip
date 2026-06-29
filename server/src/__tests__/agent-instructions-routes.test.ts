@@ -37,6 +37,8 @@ const mockSyncInstructionsBundleConfigFromFilePath = vi.hoisted(() => vi.fn());
 const mockFindServerAdapter = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/index.js", () => ({
+  agentGithubIdentityService: () => ({}),
+  agentScriptsService: () => ({}),
   agentService: () => mockAgentService,
   agentInstructionsService: () => mockAgentInstructionsService,
   accessService: () => mockAccessService,
@@ -68,6 +70,8 @@ vi.mock("../adapters/index.js", () => ({
 
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
+    agentGithubIdentityService: () => ({}),
+    agentScriptsService: () => ({}),
     agentService: () => mockAgentService,
     agentInstructionsService: () => mockAgentInstructionsService,
     accessService: () => mockAccessService,
@@ -97,6 +101,20 @@ function registerModuleMocks() {
   }));
 }
 
+// Minimal db surface used directly by route handlers (e.g. syncClaudeFallbackBinding
+// runs a select + a transaction with delete/insert when the adapter switches to/from
+// claude). Everything resolves empty so the handler proceeds without a real database.
+function createFakeDb() {
+  const tx = {
+    delete: () => ({ where: () => Promise.resolve() }),
+    insert: () => ({ values: () => Promise.resolve() }),
+  };
+  return {
+    select: () => ({ from: () => ({ where: () => Promise.resolve([]) }) }),
+    transaction: async (fn: (tx: unknown) => unknown) => fn(tx),
+  } as any;
+}
+
 async function createApp() {
   const [{ agentRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
@@ -114,7 +132,7 @@ async function createApp() {
     };
     next();
   });
-  app.use("/api", agentRoutes({} as any));
+  app.use("/api", agentRoutes(createFakeDb()));
   app.use(errorHandler);
   return app;
 }

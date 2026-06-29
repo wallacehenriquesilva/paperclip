@@ -17,10 +17,10 @@ function createSelectChain(rows: unknown[]) {
 
 function createDb() {
   return {
-    select: vi
-      .fn()
-      .mockImplementationOnce(() => createSelectChain([]))
-      .mockImplementationOnce(() => createSelectChain([])),
+    // actorMiddleware issues several reads on the session path (user
+    // deactivation check, instance-admin role, memberships). Resolve every
+    // select to an empty result so order/count changes don't break the test.
+    select: vi.fn(() => createSelectChain([])),
   } as any;
 }
 

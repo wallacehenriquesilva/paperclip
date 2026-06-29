@@ -184,6 +184,8 @@ function registerModuleMocks() {
   }));
 
   vi.doMock("../services/index.js", () => ({
+    agentGithubIdentityService: () => ({}),
+    agentScriptsService: () => ({}),
     agentService: () => mockAgentService,
     agentInstructionsService: () => mockAgentInstructionsService,
     accessService: () => mockAccessService,
