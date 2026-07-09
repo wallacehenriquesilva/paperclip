@@ -36,17 +36,21 @@ const projectSvc = {
 const issueSvc = {
   list: vi.fn(),
   listComments: vi.fn(),
+  listImportedBySourceSlug: vi.fn().mockResolvedValue([]),
   getById: vi.fn(),
   getByIdentifier: vi.fn(),
   create: vi.fn(),
+  update: vi.fn(),
   addComment: vi.fn(),
 };
 
 const routineSvc = {
-  list: vi.fn(),
+  list: vi.fn().mockResolvedValue([]),
   getDetail: vi.fn(),
   create: vi.fn(),
+  update: vi.fn(),
   createTrigger: vi.fn(),
+  deleteTrigger: vi.fn(),
 };
 
 const companySkillSvc = {
@@ -1673,6 +1677,126 @@ describe("company portability", () => {
       replayWindowSec: 120,
     }), expect.any(Object));
     expect(issueSvc.create).not.toHaveBeenCalled();
+  });
+
+  describe("idempotent routine re-import (source_slug)", () => {
+    const recurringFiles = () => ({
+      "COMPANY.md": [
+        "---",
+        'schema: "agentcompanies/v1"',
+        'name: "Acme"',
+        "---",
+        "",
+      ].join("\n"),
+      "tasks/monday-review/TASK.md": [
+        "---",
+        'name: "Monday Review"',
+        'project: "launch"',
+        'assignee: "claudecoder"',
+        "recurring: true",
+        "---",
+        "",
+        "Review pipeline health.",
+        "",
+      ].join("\n"),
+      ".paperclip.yaml": [
+        'schema: "paperclip/v1"',
+        "routines:",
+        "  monday-review:",
+        '    status: "paused"',
+        '    priority: "high"',
+        "    triggers:",
+        "      - kind: schedule",
+        '        cronExpression: "0 9 * * 1"',
+        '        timezone: "America/Chicago"',
+        "",
+      ].join("\n"),
+    });
+
+    const importInput = (collisionStrategy: "replace" | "skip" | "rename") => ({
+      source: { type: "inline" as const, rootPath: "acme", files: recurringFiles() },
+      include: { company: false, agents: false, projects: false, issues: true, skills: false },
+      target: { mode: "existing_company" as const, companyId: "company-1" },
+      agents: "all" as const,
+      collisionStrategy,
+    });
+
+    beforeEach(() => {
+      companySvc.getById.mockResolvedValue({ id: "company-1", name: "Acme" });
+      agentSvc.list.mockResolvedValue([
+        { id: "agent-1", name: "ClaudeCoder", status: "active" },
+      ]);
+      projectSvc.list.mockResolvedValue([
+        { id: "project-1", urlKey: "launch", name: "Launch", archivedAt: null },
+      ]);
+      routineSvc.create.mockResolvedValue({ id: "routine-new" });
+      routineSvc.update.mockResolvedValue({ id: "routine-1" });
+    });
+
+    it("updates a matching routine in place instead of duplicating (replace)", async () => {
+      const portability = companyPortabilityService({} as any);
+      routineSvc.list.mockResolvedValue([
+        { id: "routine-1", sourceSlug: "monday-review", title: "old", triggers: [{ id: "trig-old" }] },
+      ]);
+
+      await portability.importBundle(importInput("replace"), "user-1");
+
+      expect(routineSvc.update).toHaveBeenCalledWith(
+        "routine-1",
+        expect.objectContaining({ title: "Monday Review", status: "paused" }),
+        expect.any(Object),
+      );
+      expect(routineSvc.create).not.toHaveBeenCalled();
+      expect(routineSvc.deleteTrigger).toHaveBeenCalledWith("trig-old", expect.any(Object));
+      expect(routineSvc.createTrigger).toHaveBeenCalledTimes(1);
+      expect(routineSvc.createTrigger).toHaveBeenCalledWith(
+        "routine-1",
+        expect.objectContaining({ kind: "schedule", cronExpression: "0 9 * * 1" }),
+        expect.any(Object),
+      );
+    });
+
+    it("creates a routine carrying its source slug when none matches", async () => {
+      const portability = companyPortabilityService({} as any);
+      routineSvc.list.mockResolvedValue([]);
+
+      await portability.importBundle(importInput("replace"), "user-1");
+
+      expect(routineSvc.update).not.toHaveBeenCalled();
+      expect(routineSvc.create).toHaveBeenCalledWith(
+        "company-1",
+        expect.objectContaining({ title: "Monday Review", sourceSlug: "monday-review" }),
+        expect.any(Object),
+      );
+    });
+
+    it("skips a matching routine when collisionStrategy is skip", async () => {
+      const portability = companyPortabilityService({} as any);
+      routineSvc.list.mockResolvedValue([
+        { id: "routine-1", sourceSlug: "monday-review", title: "old", triggers: [] },
+      ]);
+
+      const result = await portability.importBundle(importInput("skip"), "user-1");
+
+      expect(routineSvc.update).not.toHaveBeenCalled();
+      expect(routineSvc.create).not.toHaveBeenCalled();
+      expect(result.warnings).toContain(
+        "Recurring task monday-review already exists as a routine and was skipped (collisionStrategy=skip).",
+      );
+    });
+
+    it("previews a matching routine as an update on re-import", async () => {
+      const portability = companyPortabilityService({} as any);
+      routineSvc.list.mockResolvedValue([
+        { id: "routine-1", sourceSlug: "monday-review", title: "old", triggers: [] },
+      ]);
+
+      const preview = await portability.previewImport(importInput("replace"));
+
+      expect(preview.plan.issuePlans).toEqual([
+        expect.objectContaining({ slug: "monday-review", action: "update" }),
+      ]);
+    });
   });
 
   it("migrates legacy schedule.recurrence imports into routine triggers", async () => {

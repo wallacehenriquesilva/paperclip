@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { and, asc, desc, eq, gt, inArray, isNull, like, lt, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -1567,6 +1567,7 @@ const issueListSelect = {
   createdByUserId: issues.createdByUserId,
   issueNumber: issues.issueNumber,
   identifier: issues.identifier,
+  sourceSlug: issues.sourceSlug,
   originKind: issues.originKind,
   originId: issues.originId,
   originRunId: issues.originRunId,
@@ -4006,6 +4007,22 @@ export function issueService(db: Db) {
         parentBlockerAdded: Boolean(blockParentUntilDone),
       };
     },
+
+    // Non-hidden issues that carry a portability source_slug, for idempotent
+    // re-imports (match existing issues by their stable origin key).
+    listImportedBySourceSlug: async (
+      companyId: string,
+    ): Promise<Array<{ id: string; sourceSlug: string | null }>> =>
+      db
+        .select({ id: issues.id, sourceSlug: issues.sourceSlug })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, companyId),
+            isNotNull(issues.sourceSlug),
+            isNull(issues.hiddenAt),
+          ),
+        ),
 
     create: async (
       companyId: string,

@@ -21,6 +21,7 @@ import type {
   CompanyPortabilityIssueCommentManifestEntry,
   CompanyPortabilityPreview,
   CompanyPortabilityPreviewAgentPlan,
+  CompanyPortabilityPreviewIssuePlan,
   CompanyPortabilityPreviewResult,
   CompanyPortabilityProjectManifestEntry,
   CompanyPortabilityProjectWorkspaceManifestEntry,
@@ -31,6 +32,8 @@ import type {
   CompanyPortabilitySkillManifestEntry,
   CompanySkill,
   AgentEnvConfig,
+  CreateRoutineTrigger,
+  RoutineListItem,
   RoutineVariable,
 } from "@paperclipai/shared";
 import {
@@ -3057,7 +3060,27 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   const companySkills = companySkillService(db);
   const companyMcpServers = companyMcpServerService(db);
   const secrets = secretService(db);
+  const routines = routineService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  // Idempotent re-import support: existing routines/issues are matched against
+  // the manifest by their stable `source_slug` (= the task folder slug). Scoped
+  // to the target company so we never match across tenants.
+  async function loadExistingRoutinesBySourceSlug(companyId: string) {
+    const map = new Map<string, RoutineListItem>();
+    for (const routine of (await routines.list(companyId)) ?? []) {
+      if (routine.sourceSlug) map.set(routine.sourceSlug, routine);
+    }
+    return map;
+  }
+
+  async function loadExistingIssueIdsBySourceSlug(companyId: string) {
+    const map = new Map<string, string>();
+    for (const row of (await issues.listImportedBySourceSlug(companyId)) ?? []) {
+      if (row.sourceSlug) map.set(row.sourceSlug, row.id);
+    }
+    return map;
+  }
 
   function assertKnownImportAdapterType(type: string | null | undefined): string {
     const adapterType = typeof type === "string" ? type.trim() : "";
@@ -4095,6 +4118,8 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const issuePlans: CompanyPortabilityPreviewResult["plan"]["issuePlans"] = [];
     const existingProjectSlugToProject = new Map<string, { id: string; name: string }>();
     const existingProjectSlugs = new Set<string>();
+    const existingRoutineSourceSlugs = new Set<string>();
+    const existingIssueSourceSlugs = new Set<string>();
 
     if (input.target.mode === "existing_company") {
       const existingAgents = await agents.list(input.target.companyId);
@@ -4109,6 +4134,15 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           existingProjectSlugToProject.set(existing.urlKey, { id: existing.id, name: existing.name });
         }
         existingProjectSlugs.add(existing.urlKey);
+      }
+
+      if (include.issues) {
+        for (const slug of (await loadExistingRoutinesBySourceSlug(input.target.companyId)).keys()) {
+          existingRoutineSourceSlugs.add(slug);
+        }
+        for (const slug of (await loadExistingIssueIdsBySourceSlug(input.target.companyId)).keys()) {
+          existingIssueSourceSlugs.add(slug);
+        }
       }
 
       const existingSkills = await companySkills.listFull(input.target.companyId);
@@ -4254,12 +4288,24 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     }
 
     if (include.issues) {
+      const canReplace = mode === "board_full" && collisionStrategy === "replace";
       for (const manifestIssue of manifest.issues) {
+        const existingSlugs = manifestIssue.recurring ? existingRoutineSourceSlugs : existingIssueSourceSlugs;
+        const matched = existingSlugs.has(manifestIssue.slug);
+        const action: CompanyPortabilityPreviewIssuePlan["action"] = matched
+          ? (collisionStrategy === "skip" ? "skip" : canReplace ? "update" : "create")
+          : "create";
+        const recurringReason = manifestIssue.recurring ? "Recurring task will be imported as a routine." : null;
+        const updateReason = action === "update"
+          ? (manifestIssue.recurring
+            ? "Recurring task already exists; the routine will be updated in place."
+            : "Issue already exists; it will be updated in place.")
+          : recurringReason;
         issuePlans.push({
           slug: manifestIssue.slug,
-          action: "create",
+          action,
           plannedTitle: manifestIssue.title,
-          reason: manifestIssue.recurring ? "Recurring task will be imported as a routine." : null,
+          reason: updateReason,
         });
       }
     }
@@ -4877,7 +4923,17 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     }
 
     if (include.issues) {
-      const routines = routineService(db);
+      // Idempotent re-import: match existing routines/issues by source_slug so a
+      // re-apply updates in place (replace) instead of appending duplicates. Only
+      // an existing company can have anything to match against.
+      const existingRoutineBySlug = input.target.mode === "existing_company"
+        ? await loadExistingRoutinesBySourceSlug(targetCompany.id)
+        : new Map<string, RoutineListItem>();
+      const existingIssueIdBySlug = input.target.mode === "existing_company"
+        ? await loadExistingIssueIdsBySourceSlug(targetCompany.id)
+        : new Map<string, string>();
+      const canReplace = mode === "board_full" && plan.collisionStrategy === "replace";
+      const importActor = { agentId: null, userId: actorUserId ?? null };
       for (const manifestIssue of sourceManifest.issues) {
         const markdownRaw = readPortableTextFile(plan.source.files, manifestIssue.path);
         const parsed = markdownRaw ? parseFrontmatterMarkdown(markdownRaw) : null;
@@ -4916,78 +4972,79 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             variables: null,
             triggers: [],
           };
-          const createdRoutine = await routines.create(targetCompany.id, {
+          const routineFields = {
             projectId,
             goalId: null,
             parentIssueId: null,
             title: manifestIssue.title,
             description,
             assigneeAgentId,
-            priority: manifestIssue.priority && ISSUE_PRIORITIES.includes(manifestIssue.priority as any)
-              ? manifestIssue.priority as typeof ISSUE_PRIORITIES[number]
-              : "medium",
-            status: manifestIssue.status && ROUTINE_STATUSES.includes(manifestIssue.status as any)
-              ? manifestIssue.status as typeof ROUTINE_STATUSES[number]
-              : "active",
-            concurrencyPolicy:
-              routineDefinition.concurrencyPolicy && ROUTINE_CONCURRENCY_POLICIES.includes(routineDefinition.concurrencyPolicy as any)
-                ? routineDefinition.concurrencyPolicy as typeof ROUTINE_CONCURRENCY_POLICIES[number]
-                : "coalesce_if_active",
-            catchUpPolicy:
-              routineDefinition.catchUpPolicy && ROUTINE_CATCH_UP_POLICIES.includes(routineDefinition.catchUpPolicy as any)
-                ? routineDefinition.catchUpPolicy as typeof ROUTINE_CATCH_UP_POLICIES[number]
-                : "skip_missed",
+            priority: (manifestIssue.priority && ISSUE_PRIORITIES.includes(manifestIssue.priority as any)
+              ? manifestIssue.priority
+              : "medium") as typeof ISSUE_PRIORITIES[number],
+            status: (manifestIssue.status && ROUTINE_STATUSES.includes(manifestIssue.status as any)
+              ? manifestIssue.status
+              : "active") as typeof ROUTINE_STATUSES[number],
+            concurrencyPolicy: (routineDefinition.concurrencyPolicy && ROUTINE_CONCURRENCY_POLICIES.includes(routineDefinition.concurrencyPolicy as any)
+              ? routineDefinition.concurrencyPolicy
+              : "coalesce_if_active") as typeof ROUTINE_CONCURRENCY_POLICIES[number],
+            catchUpPolicy: (routineDefinition.catchUpPolicy && ROUTINE_CATCH_UP_POLICIES.includes(routineDefinition.catchUpPolicy as any)
+              ? routineDefinition.catchUpPolicy
+              : "skip_missed") as typeof ROUTINE_CATCH_UP_POLICIES[number],
             variables: routineDefinition.variables ?? [],
-          }, {
-            agentId: null,
-            userId: actorUserId ?? null,
-          });
-          for (const trigger of routineDefinition.triggers) {
+          };
+          const WEBHOOK_SIGNING_MODES = ["bearer", "hmac_sha256", "github_hmac", "none"] as const;
+          const triggerInputs: CreateRoutineTrigger[] = routineDefinition.triggers.flatMap((trigger): CreateRoutineTrigger[] => {
             if (trigger.kind === "schedule") {
-              await routines.createTrigger(createdRoutine.id, {
+              return [{
                 kind: "schedule",
                 label: trigger.label,
                 enabled: trigger.enabled,
                 cronExpression: trigger.cronExpression!,
                 timezone: trigger.timezone!,
-              }, {
-                agentId: null,
-                userId: actorUserId ?? null,
-              });
-              continue;
+              }];
             }
             if (trigger.kind === "webhook") {
-              const WEBHOOK_SIGNING_MODES = ["bearer", "hmac_sha256", "github_hmac", "none"] as const;
-              type WebhookSigningMode = (typeof WEBHOOK_SIGNING_MODES)[number];
-              const signingMode: WebhookSigningMode =
-                trigger.signingMode && (WEBHOOK_SIGNING_MODES as readonly string[]).includes(trigger.signingMode)
-                  ? (trigger.signingMode as WebhookSigningMode)
-                  : "bearer";
-              await routines.createTrigger(createdRoutine.id, {
+              const signingMode = trigger.signingMode && (WEBHOOK_SIGNING_MODES as readonly string[]).includes(trigger.signingMode)
+                ? trigger.signingMode as typeof WEBHOOK_SIGNING_MODES[number]
+                : "bearer";
+              return [{
                 kind: "webhook",
                 label: trigger.label,
                 enabled: trigger.enabled,
                 signingMode,
                 replayWindowSec: trigger.replayWindowSec ?? 300,
-              }, {
-                agentId: null,
-                userId: actorUserId ?? null,
-              });
-              continue;
+              }];
             }
-            if (trigger.kind === "slack_event" || trigger.kind === "slack_command") {
-              // Slack triggers carry an external signing secret that we do not
-              // export — skip them in portability for V1.
-              continue;
+            // Slack triggers carry an external signing secret we do not export — skip in V1.
+            if (trigger.kind === "slack_event" || trigger.kind === "slack_command") return [];
+            return [{ kind: "api", label: trigger.label, enabled: trigger.enabled }];
+          });
+
+          const existingRoutine = existingRoutineBySlug.get(manifestIssue.slug);
+          if (existingRoutine && plan.collisionStrategy === "skip") {
+            warnings.push(`Recurring task ${manifestIssue.slug} already exists as a routine and was skipped (collisionStrategy=skip).`);
+            continue;
+          }
+          if (existingRoutine && canReplace) {
+            // Update in place: preserves the routine id and its run history; Git
+            // is authoritative, so triggers are replaced to match the manifest.
+            await routines.update(existingRoutine.id, routineFields, importActor);
+            for (const existingTrigger of existingRoutine.triggers) {
+              await routines.deleteTrigger(existingTrigger.id, importActor);
             }
-            await routines.createTrigger(createdRoutine.id, {
-              kind: "api",
-              label: trigger.label,
-              enabled: trigger.enabled,
-            }, {
-              agentId: null,
-              userId: actorUserId ?? null,
-            });
+            for (const triggerInput of triggerInputs) {
+              await routines.createTrigger(existingRoutine.id, triggerInput, importActor);
+            }
+            continue;
+          }
+          const createdRoutine = await routines.create(
+            targetCompany.id,
+            { ...routineFields, sourceSlug: manifestIssue.slug },
+            importActor,
+          );
+          for (const triggerInput of triggerInputs) {
+            await routines.createTrigger(createdRoutine.id, triggerInput, importActor);
           }
           continue;
         }
@@ -4998,20 +5055,37 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           warnings.push(`Task ${manifestIssue.slug} was downgraded to todo because its assignee could not be imported as assignable work.`);
           issueStatus = "todo";
         }
-        const createdIssue = await issues.create(targetCompany.id, {
+        const issueFields = {
           projectId,
           projectWorkspaceId,
           title: manifestIssue.title,
           description,
           assigneeAgentId,
           status: issueStatus,
-          priority: manifestIssue.priority && ISSUE_PRIORITIES.includes(manifestIssue.priority as any)
-            ? manifestIssue.priority as typeof ISSUE_PRIORITIES[number]
-            : "medium",
+          priority: (manifestIssue.priority && ISSUE_PRIORITIES.includes(manifestIssue.priority as any)
+            ? manifestIssue.priority
+            : "medium") as typeof ISSUE_PRIORITIES[number],
           billingCode: manifestIssue.billingCode,
           assigneeAdapterOverrides: manifestIssue.assigneeAdapterOverrides,
           executionWorkspaceSettings: manifestIssue.executionWorkspaceSettings,
           labelIds: manifestIssue.labelIds ?? [],
+        };
+        const existingIssueId = existingIssueIdBySlug.get(manifestIssue.slug);
+        if (existingIssueId && plan.collisionStrategy === "skip") {
+          warnings.push(`Task ${manifestIssue.slug} already exists and was skipped (collisionStrategy=skip).`);
+          continue;
+        }
+        if (existingIssueId && canReplace) {
+          const updated = await issues.update(existingIssueId, issueFields);
+          if (updated) {
+            // V1: issue fields are synced in place; comments are not reconciled.
+            continue;
+          }
+          // Issue vanished between read and write — fall back to creating a fresh one.
+        }
+        const createdIssue = await issues.create(targetCompany.id, {
+          ...issueFields,
+          sourceSlug: manifestIssue.slug,
         });
         for (const comment of manifestIssue.comments ?? []) {
           const authorAgentId = comment.authorType === "agent" && comment.authorAgentSlug

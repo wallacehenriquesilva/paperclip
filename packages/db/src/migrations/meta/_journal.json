@@ -666,6 +666,13 @@
       "when": 1782701664621,
       "tag": "0094_public_argent",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1782709066457,
+      "tag": "0095_chemical_echo",
+      "breakpoints": true
     }
   ]
 }

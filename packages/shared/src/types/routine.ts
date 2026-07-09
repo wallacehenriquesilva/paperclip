@@ -53,6 +53,8 @@ export interface Routine {
   parentIssueId: string | null;
   title: string;
   description: string | null;
+  /** Stable origin key for idempotent re-imports; null/absent for UI-created routines. */
+  sourceSlug?: string | null;
   assigneeAgentId: string | null;
   priority: string;
   status: string;
