@@ -42,6 +42,9 @@ export const issues = pgTable(
     createdByUserId: text("created_by_user_id"),
     issueNumber: integer("issue_number"),
     identifier: text("identifier"),
+    // Stable origin key for idempotent re-imports (company portability / GitOps).
+    // Null for issues created through the normal UI/API.
+    sourceSlug: text("source_slug"),
     originKind: text("origin_kind").notNull().default("manual"),
     originId: text("origin_id"),
     originRunId: text("origin_run_id"),
@@ -140,5 +143,8 @@ export const issues = pgTable(
           and ${table.hiddenAt} is null
           and ${table.status} not in ('done', 'cancelled')`,
       ),
+    companySourceSlugUq: uniqueIndex("issues_company_source_slug_uq")
+      .on(table.companyId, table.sourceSlug)
+      .where(sql`${table.sourceSlug} is not null and ${table.hiddenAt} is null`),
   }),
 );

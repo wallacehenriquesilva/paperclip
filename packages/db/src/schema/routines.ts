@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
   boolean,
@@ -29,6 +30,9 @@ export const routines = pgTable(
     parentIssueId: uuid("parent_issue_id").references(() => issues.id, { onDelete: "set null" }),
     title: text("title").notNull(),
     description: text("description"),
+    // Stable origin key for idempotent re-imports (company portability / GitOps).
+    // Null for routines created through the normal UI/API.
+    sourceSlug: text("source_slug"),
     assigneeAgentId: uuid("assignee_agent_id").references(() => agents.id),
     priority: text("priority").notNull().default("medium"),
     status: text("status").notNull().default("active"),
@@ -50,6 +54,9 @@ export const routines = pgTable(
     companyStatusIdx: index("routines_company_status_idx").on(table.companyId, table.status),
     companyAssigneeIdx: index("routines_company_assignee_idx").on(table.companyId, table.assigneeAgentId),
     companyProjectIdx: index("routines_company_project_idx").on(table.companyId, table.projectId),
+    companySourceSlugUq: uniqueIndex("routines_company_source_slug_uq")
+      .on(table.companyId, table.sourceSlug)
+      .where(sql`${table.sourceSlug} is not null`),
   }),
 );
 

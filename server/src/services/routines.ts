@@ -1795,7 +1795,11 @@ export function routineService(
       };
     },
 
-    create: async (companyId: string, input: CreateRoutine, actor: Actor): Promise<Routine> => {
+    create: async (
+      companyId: string,
+      input: CreateRoutine & { sourceSlug?: string | null },
+      actor: Actor,
+    ): Promise<Routine> => {
       await assertProject(companyId, input.projectId ?? null);
       await assertAssignableAgent(companyId, input.assigneeAgentId ?? null);
       if (input.goalId) await assertGoal(companyId, input.goalId);
@@ -1817,6 +1821,7 @@ export function routineService(
             parentIssueId: input.parentIssueId ?? null,
             title: input.title,
             description: input.description ?? null,
+            sourceSlug: input.sourceSlug ?? null,
             assigneeAgentId: input.assigneeAgentId ?? null,
             priority: input.priority,
             status,
