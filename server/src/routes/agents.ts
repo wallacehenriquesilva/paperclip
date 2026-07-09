@@ -3547,6 +3547,32 @@ export function agentRoutes(
     res.json(result);
   });
 
+  router.get("/heartbeat-runs/:runId/log/download", async (req, res) => {
+    const runId = req.params.runId as string;
+    const run = await heartbeat.getRunLogAccess(runId);
+    if (!run) {
+      res.status(404).json({ error: "Heartbeat run not found" });
+      return;
+    }
+    assertCompanyAccess(req, run.companyId);
+
+    const { stream, size } = await heartbeat.openRunLogStream(run);
+
+    res.set("Content-Type", "application/x-ndjson");
+    res.set("Content-Length", String(size));
+    res.set("Content-Disposition", `attachment; filename="run-${runId}.ndjson"`);
+    res.set("Cache-Control", "no-cache, no-store");
+
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to read run log" });
+      } else {
+        res.destroy();
+      }
+    });
+    stream.pipe(res);
+  });
+
   router.get("/heartbeat-runs/:runId/workspace-operations", async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRun(runId);

@@ -77,6 +77,7 @@ import {
   HelpCircle,
   FolderOpen,
   Zap,
+  Download,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -4006,6 +4007,17 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
           Transcript ({transcript.length})
         </span>
         <div className="flex items-center gap-2">
+          {run.logRef && (
+            <Button variant="ghost" size="xs" asChild title="Download the complete raw transcript (.ndjson)">
+              <a
+                href={`/api/heartbeat-runs/${run.id}/log/download`}
+                download={`run-${run.id}.ndjson`}
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download
+              </a>
+            </Button>
+          )}
           <div className="inline-flex rounded-lg border border-border/70 bg-background/70 p-0.5">
             {(["nice", "raw"] as const).map((mode) => (
               <button
