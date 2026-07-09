@@ -9929,6 +9929,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     },
 
+    openRunLogStream: async (
+      runOrLookup: string | {
+        id: string;
+        logStore: string | null;
+        logRef: string | null;
+      },
+    ) => {
+      const run = typeof runOrLookup === "string" ? await getRunLogAccess(runOrLookup) : runOrLookup;
+      const runId = typeof runOrLookup === "string" ? runOrLookup : runOrLookup.id;
+      if (!run) throw notFound("Heartbeat run not found");
+      if (!run.logStore || !run.logRef) throw notFound("Run log not found");
+
+      const { stream, size } = await runLogStore.openReadStream({
+        store: run.logStore as "local_file",
+        logRef: run.logRef,
+      });
+      return { runId, stream, size };
+    },
+
     invoke: async (
       agentId: string,
       source: "timer" | "assignment" | "on_demand" | "automation" = "on_demand",
