@@ -1,11 +1,18 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { PatchInstanceGeneralSettings, BackupRetentionPolicy } from "@paperclipai/shared";
+import type {
+  PatchInstanceGeneralSettings,
+  BackupRetentionPolicy,
+  LogRetentionPolicy,
+} from "@paperclipai/shared";
 import {
   DAILY_RETENTION_PRESETS,
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
   DEFAULT_BACKUP_RETENTION,
+  SERVER_LOG_MAX_SIZE_MB_PRESETS,
+  RUN_LOG_MAX_AGE_DAYS_PRESETS,
+  DEFAULT_LOG_RETENTION,
 } from "@paperclipai/shared";
 import { LogOut, SlidersHorizontal } from "lucide-react";
 import { authApi } from "@/api/auth";
@@ -19,6 +26,18 @@ import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { cn } from "../lib/utils";
 
 const FEEDBACK_TERMS_URL = import.meta.env.VITE_FEEDBACK_TERMS_URL?.trim() || "https://paperclip.ing/tos";
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
 
 export function InstanceGeneralSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -63,6 +82,24 @@ export function InstanceGeneralSettings() {
     },
   });
 
+  const [pruneMessage, setPruneMessage] = useState<string | null>(null);
+  const pruneLogsMutation = useMutation({
+    mutationFn: instanceSettingsApi.pruneLogs,
+    onSuccess: (result) => {
+      setActionError(null);
+      const reclaimed = result.serverLog.reclaimedBytes + result.runLogs.reclaimedBytes;
+      setPruneMessage(
+        reclaimed > 0
+          ? `Reclaimed ${formatBytes(reclaimed)} (${result.runLogs.deleted} run log(s) removed${result.serverLog.truncated ? ", server log truncated" : ""}).`
+          : "Nothing to prune — logs are within their limits.",
+      );
+    },
+    onError: (error) => {
+      setPruneMessage(null);
+      setActionError(error instanceof Error ? error.message : "Failed to prune logs.");
+    },
+  });
+
   if (generalQuery.isLoading) {
     return <div className="text-sm text-muted-foreground">Loading general settings...</div>;
   }
@@ -81,6 +118,7 @@ export function InstanceGeneralSettings() {
   const keyboardShortcuts = generalQuery.data?.keyboardShortcuts === true;
   const feedbackDataSharingPreference = generalQuery.data?.feedbackDataSharingPreference ?? "prompt";
   const backupRetention: BackupRetentionPolicy = generalQuery.data?.backupRetention ?? DEFAULT_BACKUP_RETENTION;
+  const logRetention: LogRetentionPolicy = generalQuery.data?.logRetention ?? DEFAULT_LOG_RETENTION;
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -269,6 +307,91 @@ export function InstanceGeneralSettings() {
                 );
               })}
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="space-y-5">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Log retention</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Keep the data volume from filling up. The server log is a single file that is
+              truncated once it exceeds the size cap; per-run transcripts are deleted once older
+              than the age limit. Pruning runs automatically in the background.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Server log size cap</h3>
+            <div className="flex flex-wrap gap-2">
+              {SERVER_LOG_MAX_SIZE_MB_PRESETS.map((mb) => {
+                const active = logRetention.serverLogMaxSizeMb === mb;
+                const label = mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`;
+                return (
+                  <button
+                    key={mb}
+                    type="button"
+                    disabled={updateGeneralMutation.isPending}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+                      active
+                        ? "border-foreground bg-accent text-foreground"
+                        : "border-border bg-background hover:bg-accent/50",
+                    )}
+                    onClick={() =>
+                      updateGeneralMutation.mutate({
+                        logRetention: { ...logRetention, serverLogMaxSizeMb: mb },
+                      })
+                    }
+                  >
+                    <div className="text-sm font-medium">{label}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Run-log max age</h3>
+            <div className="flex flex-wrap gap-2">
+              {RUN_LOG_MAX_AGE_DAYS_PRESETS.map((days) => {
+                const active = logRetention.runLogMaxAgeDays === days;
+                const label = days === 0 ? "Keep forever" : `${days} days`;
+                return (
+                  <button
+                    key={days}
+                    type="button"
+                    disabled={updateGeneralMutation.isPending}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+                      active
+                        ? "border-foreground bg-accent text-foreground"
+                        : "border-border bg-background hover:bg-accent/50",
+                    )}
+                    onClick={() =>
+                      updateGeneralMutation.mutate({
+                        logRetention: { ...logRetention, runLogMaxAgeDays: days },
+                      })
+                    }
+                  >
+                    <div className="text-sm font-medium">{label}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={pruneLogsMutation.isPending}
+              onClick={() => pruneLogsMutation.mutate()}
+            >
+              {pruneLogsMutation.isPending ? "Pruning…" : "Prune now"}
+            </Button>
+            {pruneMessage && <span className="text-sm text-muted-foreground">{pruneMessage}</span>}
           </div>
         </div>
       </section>

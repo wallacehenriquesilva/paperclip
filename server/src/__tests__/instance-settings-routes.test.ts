@@ -13,12 +13,18 @@ const mockHeartbeatService = vi.hoisted(() => ({
   buildIssueGraphLivenessAutoRecoveryPreview: vi.fn(),
   reconcileIssueGraphLiveness: vi.fn(),
 }));
+const mockLogRetentionService = vi.hoisted(() => ({
+  pruneLogs: vi.fn(),
+  resolveServerLogPath: vi.fn(),
+  resolveRunLogBasePath: vi.fn(),
+}));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     heartbeatService: () => mockHeartbeatService,
     instanceSettingsService: () => mockInstanceSettingsService,
+    logRetentionService: () => mockLogRetentionService,
     logActivity: mockLogActivity,
   }));
 }
@@ -55,6 +61,11 @@ describe("instance settings routes", () => {
     mockInstanceSettingsService.listCompanyIds.mockReset();
     mockHeartbeatService.buildIssueGraphLivenessAutoRecoveryPreview.mockReset();
     mockHeartbeatService.reconcileIssueGraphLiveness.mockReset();
+    mockLogRetentionService.pruneLogs.mockReset();
+    mockLogRetentionService.pruneLogs.mockResolvedValue({
+      serverLog: { path: "/tmp/server.log", existed: true, truncated: true, reclaimedBytes: 1024 },
+      runLogs: { basePath: "/tmp/run-logs", scanned: 3, deleted: 2, reclaimedBytes: 2048 },
+    });
     mockLogActivity.mockReset();
     mockInstanceSettingsService.getGeneral.mockResolvedValue({
       censorUsernameInLogs: false,
@@ -137,6 +148,35 @@ describe("instance settings routes", () => {
       enableIsolatedWorkspaces: true,
     });
     expect(mockLogActivity).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("prunes logs on demand for instance admins and logs the activity", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app).post("/api/instance/settings/logs/prune").send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.runLogs.deleted).toBe(2);
+    expect(mockLogRetentionService.pruneLogs).toHaveBeenCalledTimes(1);
+    // one activity entry per company
+    expect(mockLogActivity).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("rejects non-admin board users from pruning logs", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "member",
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    await request(app).post("/api/instance/settings/logs/prune").send({}).expect(403);
+    expect(mockLogRetentionService.pruneLogs).not.toHaveBeenCalled();
   }, 10_000);
 
   it("allows local board users to update guarded dev-server auto-restart", async () => {

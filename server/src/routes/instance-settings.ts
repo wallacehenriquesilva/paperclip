@@ -7,7 +7,12 @@ import {
 } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 import { validate } from "../middleware/validate.js";
-import { heartbeatService, instanceSettingsService, logActivity } from "../services/index.js";
+import {
+  heartbeatService,
+  instanceSettingsService,
+  logActivity,
+  logRetentionService,
+} from "../services/index.js";
 import { assertBoardOrgAccess, getActorInfo } from "./authz.js";
 
 function assertCanManageInstanceSettings(req: Request) {
@@ -24,6 +29,7 @@ export function instanceSettingsRoutes(db: Db) {
   const router = Router();
   const svc = instanceSettingsService(db);
   const heartbeat = heartbeatService(db);
+  const logRetention = logRetentionService();
 
   router.get("/instance/settings/general", async (req, res) => {
     // General settings (e.g. keyboardShortcuts) are readable by any
@@ -61,6 +67,35 @@ export function instanceSettingsRoutes(db: Db) {
       res.json(updated.general);
     },
   );
+
+  router.post("/instance/settings/logs/prune", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    const general = await svc.getGeneral();
+    const result = await logRetention.pruneLogs(general.logRetention);
+    const actor = getActorInfo(req);
+    const companyIds = await svc.listCompanyIds();
+    await Promise.all(
+      companyIds.map((companyId) =>
+        logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "instance.logs.pruned",
+          entityType: "instance_settings",
+          entityId: "default",
+          details: {
+            serverLogTruncated: result.serverLog.truncated,
+            serverLogReclaimedBytes: result.serverLog.reclaimedBytes,
+            runLogsDeleted: result.runLogs.deleted,
+            runLogsReclaimedBytes: result.runLogs.reclaimedBytes,
+          },
+        }),
+      ),
+    );
+    res.json(result);
+  });
 
   router.get("/instance/settings/experimental", async (req, res) => {
     // Experimental settings are readable by any authenticated org member

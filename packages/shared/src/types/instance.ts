@@ -19,11 +19,43 @@ export const DEFAULT_BACKUP_RETENTION: BackupRetentionPolicy = {
   monthlyMonths: 1,
 };
 
+// Log retention. `server.log` is a single append-only file (reclaimed by
+// truncation when it exceeds the size cap); run-logs are many per-run files
+// (deleted once older than the age cap; 0 = keep forever).
+export const SERVER_LOG_MAX_SIZE_MB_PRESETS = [256, 512, 1024, 2048] as const;
+export const RUN_LOG_MAX_AGE_DAYS_PRESETS = [7, 14, 30, 0] as const;
+
+export interface LogRetentionPolicy {
+  serverLogMaxSizeMb: (typeof SERVER_LOG_MAX_SIZE_MB_PRESETS)[number];
+  runLogMaxAgeDays: (typeof RUN_LOG_MAX_AGE_DAYS_PRESETS)[number];
+}
+
+export const DEFAULT_LOG_RETENTION: LogRetentionPolicy = {
+  serverLogMaxSizeMb: 512,
+  runLogMaxAgeDays: 14,
+};
+
+export interface LogPruneResult {
+  serverLog: {
+    path: string;
+    existed: boolean;
+    truncated: boolean;
+    reclaimedBytes: number;
+  };
+  runLogs: {
+    basePath: string;
+    scanned: number;
+    deleted: number;
+    reclaimedBytes: number;
+  };
+}
+
 export interface InstanceGeneralSettings {
   censorUsernameInLogs: boolean;
   keyboardShortcuts: boolean;
   feedbackDataSharingPreference: FeedbackDataSharingPreference;
   backupRetention: BackupRetentionPolicy;
+  logRetention: LogRetentionPolicy;
 }
 
 export interface InstanceExperimentalSettings {
