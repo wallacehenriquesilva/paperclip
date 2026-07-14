@@ -5,6 +5,9 @@ import {
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
   DEFAULT_BACKUP_RETENTION,
+  SERVER_LOG_MAX_SIZE_MB_PRESETS,
+  RUN_LOG_MAX_AGE_DAYS_PRESETS,
+  DEFAULT_LOG_RETENTION,
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
@@ -24,6 +27,15 @@ export const backupRetentionPolicySchema = z.object({
   monthlyMonths: presetSchema(MONTHLY_RETENTION_PRESETS, "monthlyMonths").default(DEFAULT_BACKUP_RETENTION.monthlyMonths),
 });
 
+export const logRetentionPolicySchema = z.object({
+  serverLogMaxSizeMb: presetSchema(SERVER_LOG_MAX_SIZE_MB_PRESETS, "serverLogMaxSizeMb").default(
+    DEFAULT_LOG_RETENTION.serverLogMaxSizeMb,
+  ),
+  runLogMaxAgeDays: presetSchema(RUN_LOG_MAX_AGE_DAYS_PRESETS, "runLogMaxAgeDays").default(
+    DEFAULT_LOG_RETENTION.runLogMaxAgeDays,
+  ),
+});
+
 export const instanceGeneralSettingsSchema = z.object({
   censorUsernameInLogs: z.boolean().default(false),
   keyboardShortcuts: z.boolean().default(false),
@@ -31,6 +43,7 @@ export const instanceGeneralSettingsSchema = z.object({
     DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
   ),
   backupRetention: backupRetentionPolicySchema.default(DEFAULT_BACKUP_RETENTION),
+  logRetention: logRetentionPolicySchema.default(DEFAULT_LOG_RETENTION),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();

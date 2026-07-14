@@ -2,6 +2,7 @@ import type {
   InstanceExperimentalSettings,
   InstanceGeneralSettings,
   IssueGraphLivenessAutoRecoveryPreview,
+  LogPruneResult,
   PatchInstanceGeneralSettings,
   PatchInstanceExperimentalSettings,
 } from "@paperclipai/shared";
@@ -16,6 +17,7 @@ export const instanceSettingsApi = {
     api.get<InstanceExperimentalSettings>("/instance/settings/experimental"),
   updateExperimental: (patch: PatchInstanceExperimentalSettings) =>
     api.patch<InstanceExperimentalSettings>("/instance/settings/experimental", patch),
+  pruneLogs: () => api.post<LogPruneResult>("/instance/settings/logs/prune", {}),
   previewIssueGraphLivenessAutoRecovery: (input: { lookbackHours?: number }) =>
     api.post<IssueGraphLivenessAutoRecoveryPreview>(
       "/instance/settings/experimental/issue-graph-liveness-auto-recovery/preview",

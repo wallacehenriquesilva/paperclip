@@ -33,6 +33,7 @@ import {
   feedbackService,
   heartbeatService,
   instanceSettingsService,
+  logRetentionService,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
 } from "./services/index.js";
@@ -806,6 +807,32 @@ export async function startServer(): Promise<StartedServer> {
         // runServerDatabaseBackup already logs the failure with context.
       });
     }, backupIntervalMs);
+  }
+
+  if (config.logPruneEnabled) {
+    const logPrune = logRetentionService();
+    // Retention policy is read from Instance Settings (DB) on each tick so UI
+    // changes take effect without a restart (same as database backups).
+    const runLogPrune = () =>
+      backupSettingsSvc
+        .getGeneral()
+        .then((general) => logPrune.pruneLogs(general.logRetention))
+        .catch((err) => {
+          logger.error({ err }, "log retention prune failed");
+        });
+
+    logger.info(
+      {
+        intervalMinutes: config.logPruneIntervalMinutes,
+        retentionSource: "instance-settings-db",
+      },
+      "Automatic log retention enabled",
+    );
+    // One prune on startup relieves a full disk immediately on boot.
+    void runLogPrune();
+    setInterval(() => {
+      void runLogPrune();
+    }, config.logPruneIntervalMinutes * 60 * 1000);
   }
   
   // Wait for external adapters to finish loading before accepting requests.

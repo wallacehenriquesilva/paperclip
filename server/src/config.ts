@@ -69,6 +69,8 @@ export interface Config {
   databaseBackupIntervalMinutes: number;
   databaseBackupRetentionDays: number;
   databaseBackupDir: string;
+  logPruneEnabled: boolean;
+  logPruneIntervalMinutes: number;
   serveUi: boolean;
   uiDevMiddleware: boolean;
   secretsProvider: SecretProvider;
@@ -265,6 +267,13 @@ export function loadConfig(): Config {
       fileDatabaseBackup?.dir ??
       resolveDefaultBackupDir(),
   );
+  const logPruneEnabled = process.env.PAPERCLIP_LOG_PRUNE_ENABLED
+    ? process.env.PAPERCLIP_LOG_PRUNE_ENABLED === "true"
+    : true;
+  const logPruneIntervalMinutes = Math.max(
+    1,
+    Number(process.env.PAPERCLIP_LOG_PRUNE_INTERVAL_MINUTES) || 15,
+  );
   const bindValidationErrors = validateConfiguredBindMode({
     deploymentMode,
     deploymentExposure,
@@ -307,6 +316,8 @@ export function loadConfig(): Config {
     databaseBackupIntervalMinutes,
     databaseBackupRetentionDays,
     databaseBackupDir,
+    logPruneEnabled,
+    logPruneIntervalMinutes,
     serveUi:
       process.env.SERVE_UI !== undefined
         ? process.env.SERVE_UI === "true"
