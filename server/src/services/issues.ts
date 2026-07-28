@@ -5011,6 +5011,47 @@ export function issueService(db: Db) {
       return enrichedComments.map((comment) => redactIssueComment(comment, censorUsernameInLogs));
     },
 
+    /**
+     * Batch-fetch comments for many issues in a single query, grouped by issueId.
+     *
+     * Unlike listComments, this deliberately SKIPS run-log derived agent attribution
+     * (enrichCommentsWithDerivedAgentAttribution), which scans heartbeat_runs/activity_log
+     * per issue. Callers that only need the stored attribution (e.g. company export bundles,
+     * which discard raw board user ids anyway) must use this to avoid an N+1 of expensive
+     * sequential scans. Do NOT use where derived attribution matters (board comment views).
+     */
+    listCommentsByIssueIds: async (
+      issueIds: readonly string[],
+      opts?: { order?: "asc" | "desc" },
+    ) => {
+      const uniqueIssueIds = Array.from(
+        new Set(issueIds.map((id) => id?.trim()).filter((id): id is string => Boolean(id))),
+      );
+      const order = opts?.order === "desc" ? "desc" : "asc";
+      const rows =
+        uniqueIssueIds.length === 0
+          ? []
+          : await db
+              .select()
+              .from(issueComments)
+              .where(inArray(issueComments.issueId, uniqueIssueIds))
+              .orderBy(
+                order === "asc" ? asc(issueComments.createdAt) : desc(issueComments.createdAt),
+                order === "asc" ? asc(issueComments.id) : desc(issueComments.id),
+              );
+
+      const censorUsernameInLogs =
+        rows.length > 0 ? (await instanceSettings.getGeneral()).censorUsernameInLogs : false;
+      const redacted = rows.map((row) => redactIssueComment(row, censorUsernameInLogs));
+      const grouped = new Map<string, typeof redacted>();
+      for (const comment of redacted) {
+        const list = grouped.get(comment.issueId) ?? [];
+        list.push(comment);
+        grouped.set(comment.issueId, list);
+      }
+      return grouped;
+    },
+
     getCommentCursor: async (issueId: string) => {
       const [latest, countRow] = await Promise.all([
         db

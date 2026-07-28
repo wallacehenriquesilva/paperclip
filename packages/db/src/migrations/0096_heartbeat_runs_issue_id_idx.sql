@@ -1,0 +1,13 @@
+-- Index supporting issue-comment agent attribution derivation, which filters
+-- heartbeat_runs by company + the issueId stashed in context_snapshot. Without it,
+-- that lookup scans all of a company's runs per issue (an expensive N+1 during
+-- company exports and board comment views). Partial: only runs carrying an issueId.
+--
+-- Applied here with a plain CREATE INDEX because Drizzle's migrator runs every
+-- migration inside a single transaction, where CREATE INDEX CONCURRENTLY is illegal.
+-- On a large/hot production heartbeat_runs, build the index out-of-band FIRST with:
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "heartbeat_runs_company_context_issue_id_idx"
+--     ON "heartbeat_runs" USING btree ("company_id", (("context_snapshot" ->> 'issueId')))
+--     WHERE ("context_snapshot" ->> 'issueId') is not null;
+-- then this migration becomes a no-op thanks to IF NOT EXISTS.
+CREATE INDEX IF NOT EXISTS "heartbeat_runs_company_context_issue_id_idx" ON "heartbeat_runs" USING btree ("company_id",(("context_snapshot" ->> 'issueId'))) WHERE ("context_snapshot" ->> 'issueId') is not null;
