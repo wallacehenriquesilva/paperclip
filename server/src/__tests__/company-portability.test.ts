@@ -37,6 +37,7 @@ const issueSvc = {
   list: vi.fn(),
   listComments: vi.fn(),
   listImportedBySourceSlug: vi.fn().mockResolvedValue([]),
+  listCommentsByIssueIds: vi.fn(),
   getById: vi.fn(),
   getByIdentifier: vi.fn(),
   create: vi.fn(),
@@ -150,6 +151,16 @@ describe("company portability", () => {
       secretKeys: new Set<string>(),
     }));
     issueSvc.listComments.mockResolvedValue([]);
+    // The export path batches comments via listCommentsByIssueIds; delegate to the
+    // per-issue listComments mock so existing comment fixtures keep driving assertions.
+    issueSvc.listCommentsByIssueIds.mockImplementation(async (issueIds: string[]) => {
+      const grouped = new Map<string, unknown[]>();
+      for (const issueId of issueIds) {
+        const comments = await issueSvc.listComments(issueId, { order: "asc" });
+        if (comments.length > 0) grouped.set(issueId, comments);
+      }
+      return grouped;
+    });
     issueSvc.addComment.mockResolvedValue({
       id: "comment-imported",
       body: "Imported comment",
@@ -862,6 +873,93 @@ describe("company portability", () => {
 
     expect(preview.counts.issues).toBe(0);
     expect(preview.fileInventory.some((entry) => entry.path.startsWith("tasks/"))).toBe(false);
+  });
+
+  it("does not fetch issue comments during export preview", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.listWorkspaces.mockResolvedValue([]);
+    issueSvc.list.mockResolvedValue([
+      {
+        id: "issue-1",
+        identifier: "PAP-1",
+        title: "Write launch task",
+        description: "Task body",
+        projectId: null,
+        projectWorkspaceId: null,
+        assigneeAgentId: null,
+        status: "todo",
+        priority: "medium",
+        labelIds: [],
+        billingCode: null,
+        executionWorkspaceSettings: null,
+        assigneeAdapterOverrides: null,
+      },
+    ]);
+
+    const preview = await portability.previewExport("company-1", {
+      include: { company: true, agents: false, projects: false, issues: true },
+    });
+
+    // Comments live inside the tasks extension and never add files, so preview must
+    // skip the (expensive, heartbeat_runs-scanning) comment lookup entirely.
+    expect(preview.counts.issues).toBe(1);
+    expect(issueSvc.listCommentsByIssueIds).not.toHaveBeenCalled();
+    expect(issueSvc.listComments).not.toHaveBeenCalled();
+  });
+
+  it("batches comment fetching for the real export in a single call", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    // Override the delegating default so this test can assert listComments is never used.
+    issueSvc.listCommentsByIssueIds.mockResolvedValue(new Map());
+    projectSvc.list.mockResolvedValue([]);
+    projectSvc.listWorkspaces.mockResolvedValue([]);
+    issueSvc.list.mockResolvedValue([
+      {
+        id: "issue-1",
+        identifier: "PAP-1",
+        title: "First",
+        description: null,
+        projectId: null,
+        projectWorkspaceId: null,
+        assigneeAgentId: null,
+        status: "todo",
+        priority: "medium",
+        labelIds: [],
+        billingCode: null,
+        executionWorkspaceSettings: null,
+        assigneeAdapterOverrides: null,
+      },
+      {
+        id: "issue-2",
+        identifier: "PAP-2",
+        title: "Second",
+        description: null,
+        projectId: null,
+        projectWorkspaceId: null,
+        assigneeAgentId: null,
+        status: "todo",
+        priority: "medium",
+        labelIds: [],
+        billingCode: null,
+        executionWorkspaceSettings: null,
+        assigneeAdapterOverrides: null,
+      },
+    ]);
+
+    await portability.exportBundle("company-1", {
+      include: { company: true, agents: false, projects: false, issues: true },
+    });
+
+    // One batched query for all issues, never the per-issue listComments (avoids the N+1).
+    expect(issueSvc.listCommentsByIssueIds).toHaveBeenCalledTimes(1);
+    expect(issueSvc.listCommentsByIssueIds).toHaveBeenCalledWith(
+      ["issue-1", "issue-2"],
+      { order: "asc" },
+    );
+    expect(issueSvc.listComments).not.toHaveBeenCalled();
   });
 
   it("exports portable project workspace metadata and remaps it on import", async () => {

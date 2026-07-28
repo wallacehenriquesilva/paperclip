@@ -3260,7 +3260,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   async function exportBundle(
     companyId: string,
     input: CompanyPortabilityExport,
+    options?: { preview?: boolean },
   ): Promise<CompanyPortabilityExportResult> {
+    const isPreview = options?.preview === true;
     const include = normalizeInclude({
       ...input.include,
       agents: input.agents && input.agents.length > 0 ? true : input.include?.agents,
@@ -3736,6 +3738,18 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       paperclipProjectsOut[slug] = isPlainRecord(extension) ? extension : {};
     }
 
+    // Preview only needs counts and the file inventory; comments live inside the
+    // paperclip.tasks.yaml extension and never add files, so we skip fetching them.
+    // The real export batches all comments in a single query (grouped by issueId),
+    // deliberately without run-log derived attribution — that enrichment scans
+    // heartbeat_runs/activity_log per issue and would be an N+1 of expensive seq scans.
+    const commentsByIssueId = isPreview
+      ? null
+      : await issuesSvc.listCommentsByIssueIds(
+          selectedIssueRows.map((issue) => issue.id),
+          { order: "asc" },
+        );
+
     for (const issue of selectedIssueRows) {
       const taskSlug = taskSlugByIssueId.get(issue.id)!;
       const projectSlug = issue.projectId ? (projectSlugById.get(issue.projectId) ?? null) : null;
@@ -3757,7 +3771,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           });
         }
       }
-      const comments = await issuesSvc.listComments(issue.id, { order: "asc" });
+      const comments = commentsByIssueId?.get(issue.id) ?? [];
       files[taskPath] = buildMarkdown(
         {
           name: issue.title,
@@ -3948,7 +3962,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     if (previewInput.include && previewInput.include.issues === undefined) {
       previewInput.include.issues = false;
     }
-    const exported = await exportBundle(companyId, previewInput);
+    const exported = await exportBundle(companyId, previewInput, { preview: true });
     return {
       ...exported,
       fileInventory: Object.keys(exported.files)

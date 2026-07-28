@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { type AnyPgColumn, pgTable, uuid, text, timestamp, jsonb, index, integer, bigint, boolean } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -78,5 +79,12 @@ export const heartbeatRuns = pgTable(
       table.status,
       table.processStartedAt,
     ),
+    // Supports deriving issue-comment agent attribution, which filters runs by
+    // company + the issueId stashed in context_snapshot. Without this the lookup
+    // scans all of a company's runs per issue (an expensive N+1 during exports and
+    // board comment views). Partial: only runs that actually carry an issueId.
+    companyContextIssueIdIdx: index("heartbeat_runs_company_context_issue_id_idx")
+      .on(table.companyId, sql`((${table.contextSnapshot} ->> 'issueId'))`)
+      .where(sql`(${table.contextSnapshot} ->> 'issueId') is not null`),
   }),
 );
