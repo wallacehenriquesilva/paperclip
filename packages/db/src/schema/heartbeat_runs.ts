@@ -64,6 +64,19 @@ export const heartbeatRuns = pgTable(
       table.agentId,
       table.startedAt,
     ),
+    // The run listing endpoints order by created_at DESC with a LIMIT. Without
+    // these, Postgres reads every run for the company/agent (detoasting the
+    // fat jsonb columns row by row) just to keep the top N — tens of seconds
+    // per request once a company accumulates run history.
+    companyCreatedIdx: index("heartbeat_runs_company_created_idx").on(
+      table.companyId,
+      table.createdAt,
+    ),
+    companyAgentCreatedIdx: index("heartbeat_runs_company_agent_created_idx").on(
+      table.companyId,
+      table.agentId,
+      table.createdAt,
+    ),
     companyLivenessIdx: index("heartbeat_runs_company_liveness_idx").on(
       table.companyId,
       table.livenessState,
