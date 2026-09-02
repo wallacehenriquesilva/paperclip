@@ -47,7 +47,7 @@ function renderMarkdown(
   });
 
   for (const issue of seededIssues) {
-    queryClient.setQueryData(queryKeys.issues.detail(issue.identifier), {
+    queryClient.setQueryData([...queryKeys.issues.detail(issue.identifier), "reference"], {
       id: issue.identifier,
       identifier: issue.identifier,
       status: issue.status,
