@@ -801,7 +801,15 @@ export function routineService(
       .leftJoin(routineTriggers, eq(routineRuns.triggerId, routineTriggers.id))
       .leftJoin(issues, eq(routineRuns.linkedIssueId, issues.id))
       .where(and(eq(routineRuns.companyId, companyId), inArray(routineRuns.routineId, routineIds)))
-      .orderBy(routineRuns.routineId, desc(routineRuns.createdAt), desc(routineRuns.id));
+      // `desc nulls last` (not plain `desc`, which implies nulls first) so the
+      // sort matches routine_runs_company_routine_created_desc_idx exactly and
+      // Postgres can walk the index instead of sorting every run of the
+      // company. Both columns are NOT NULL, so the semantics are unchanged.
+      .orderBy(
+        routineRuns.routineId,
+        sql`${routineRuns.createdAt} desc nulls last`,
+        sql`${routineRuns.id} desc nulls last`,
+      );
 
     const map = new Map<string, RoutineRunSummary>();
     for (const row of rows) {

@@ -1,4 +1,6 @@
 import express, { Router, type Request as ExpressRequest } from "express";
+import compression from "compression";
+import expressStaticGzip from "express-static-gzip";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -140,6 +142,22 @@ export async function createApp(
 ) {
   const app = express();
 
+  // Compress dynamic responses (API JSON, index.html, plugin UI files). The
+  // hashed /assets files are excluded from this path: they are served below
+  // from pre-compressed .br/.gz siblings built by Vite, and compression()
+  // already skips responses that carry a Content-Encoding. SSE streams must
+  // not be buffered by compression, so they are filtered out explicitly.
+  app.use(
+    compression({
+      threshold: 1024,
+      filter: (req, res) => {
+        if (String(res.getHeader("Content-Type")).includes("text/event-stream")) {
+          return false;
+        }
+        return compression.filter(req, res);
+      },
+    }),
+  );
   app.use(express.json({
     // Company import/export payloads can inline full portable packages.
     limit: "10mb",
@@ -163,6 +181,65 @@ export async function createApp(
       bindHost: opts.bindHost,
     }),
   );
+
+  // UI static files are mounted before actorMiddleware on purpose: they are
+  // public files that need no actor context, and resolving the board session
+  // costs database round-trips — a busy database would otherwise stall every
+  // asset download behind auth queries. The SPA fallback stays mounted at the
+  // end of this function so it cannot shadow API and plugin routes.
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  let staticUiDist: string | undefined;
+  let staticIndexHtml: string | undefined;
+  if (opts.uiMode === "static") {
+    // Try published location first (server/ui-dist/), then monorepo dev location (../../ui/dist)
+    const candidates = [
+      path.resolve(__dirname, "../ui-dist"),
+      path.resolve(__dirname, "../../ui/dist"),
+    ];
+    staticUiDist = candidates.find((p) => fs.existsSync(path.join(p, "index.html")));
+    if (staticUiDist) {
+      staticIndexHtml = applyUiBranding(
+        fs.readFileSync(path.join(staticUiDist, "index.html"), "utf-8"),
+      );
+      // Hashed asset files (Vite emits them under /assets/<name>.<hash>.<ext>)
+      // never change once built, so they can be cached aggressively. Serve the
+      // pre-compressed .br/.gz siblings emitted at build time when the client
+      // accepts them — the raw main bundle is ~4.3MB, ~1MB gzip, ~800KB brotli.
+      app.use(
+        "/assets",
+        expressStaticGzip(path.join(staticUiDist, "assets"), {
+          enableBrotli: true,
+          orderPreference: ["br", "gz"],
+          serveStatic: {
+            maxAge: "1y",
+            immutable: true,
+          },
+        }),
+      );
+      // Non-hashed static files (favicon.ico, manifest, robots.txt, etc.):
+      // short cache so operators who swap them out see the new version
+      // reasonably fast. Override for `index.html` specifically — it is
+      // served by this middleware for `/` and `/index.html`, and it must
+      // never outlive the asset hashes it points at.
+      app.use(
+        express.static(staticUiDist, {
+          maxAge: "1h",
+          setHeaders(res, filePath) {
+            const basename = path.basename(filePath);
+            // index.html must never outlive the asset hashes it points at,
+            // and sw.js must roll out immediately — a stale service worker
+            // keeps serving the previous deploy's cached shell and assets.
+            if (basename === "index.html" || basename === "sw.js") {
+              res.set("Cache-Control", "no-cache");
+            }
+          },
+        }),
+      );
+    } else {
+      console.warn("[paperclip] UI dist not found; running in API-only mode");
+    }
+  }
+
   app.use(
     actorMiddleware(db, {
       deploymentMode: opts.deploymentMode,
@@ -307,60 +384,25 @@ export async function createApp(
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
   }));
 
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  if (opts.uiMode === "static") {
-    // Try published location first (server/ui-dist/), then monorepo dev location (../../ui/dist)
-    const candidates = [
-      path.resolve(__dirname, "../ui-dist"),
-      path.resolve(__dirname, "../../ui/dist"),
-    ];
-    const uiDist = candidates.find((p) => fs.existsSync(path.join(p, "index.html")));
-    if (uiDist) {
-      const indexHtml = applyUiBranding(fs.readFileSync(path.join(uiDist, "index.html"), "utf-8"));
-      // Hashed asset files (Vite emits them under /assets/<name>.<hash>.<ext>)
-      // never change once built, so they can be cached aggressively.
-      app.use(
-        "/assets",
-        express.static(path.join(uiDist, "assets"), {
-          maxAge: "1y",
-          immutable: true,
-        }),
-      );
-      // Non-hashed static files (favicon.ico, manifest, robots.txt, etc.):
-      // short cache so operators who swap them out see the new version
-      // reasonably fast. Override for `index.html` specifically — it is
-      // served by this middleware for `/` and `/index.html`, and it must
-      // never outlive the asset hashes it points at.
-      app.use(
-        express.static(uiDist, {
-          maxAge: "1h",
-          setHeaders(res, filePath) {
-            if (path.basename(filePath) === "index.html") {
-              res.set("Cache-Control", "no-cache");
-            }
-          },
-        }),
-      );
-      // SPA fallback. Only for non-asset routes — if the browser asks for
-      // /assets/something.js that doesn't exist, we must NOT serve the HTML
-      // shell: the browser would try to load it as a JavaScript module, fail
-      // with a MIME-type error, and cache that broken response. Return 404
-      // instead. The index.html response itself is no-cache so a subsequent
-      // deploy's updated asset hashes are picked up on next load.
-      app.get(/.*/, (req, res) => {
-        if (req.path.startsWith("/assets/")) {
-          res.status(404).end();
-          return;
-        }
-        res
-          .status(200)
-          .set("Content-Type", "text/html")
-          .set("Cache-Control", "no-cache")
-          .end(indexHtml);
-      });
-    } else {
-      console.warn("[paperclip] UI dist not found; running in API-only mode");
-    }
+  if (opts.uiMode === "static" && staticIndexHtml !== undefined) {
+    const indexHtml = staticIndexHtml;
+    // SPA fallback. Only for non-asset routes — if the browser asks for
+    // /assets/something.js that doesn't exist, we must NOT serve the HTML
+    // shell: the browser would try to load it as a JavaScript module, fail
+    // with a MIME-type error, and cache that broken response. Return 404
+    // instead. The index.html response itself is no-cache so a subsequent
+    // deploy's updated asset hashes are picked up on next load.
+    app.get(/.*/, (req, res) => {
+      if (req.path.startsWith("/assets/")) {
+        res.status(404).end();
+        return;
+      }
+      res
+        .status(200)
+        .set("Content-Type", "text/html")
+        .set("Cache-Control", "no-cache")
+        .end(indexHtml);
+    });
   }
 
   if (opts.uiMode === "vite-dev") {
