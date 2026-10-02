@@ -6,6 +6,9 @@ export const label = "Claude Code (local)";
 export const SANDBOX_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code";
 
 export const models = [
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
   { id: "claude-opus-5", label: "Claude Opus 5" },
   { id: "claude-fable-5", label: "Claude Fable 5" },
   { id: "claude-mythos-5", label: "Claude Mythos 5" },
@@ -24,7 +27,7 @@ export const modelProfiles: AdapterModelProfileDefinition[] = [
     label: "Cheap",
     description: "Use Claude Sonnet as the lower-cost Claude Code lane while preserving the agent's primary model.",
     adapterConfig: {
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5-5",
       effort: "low",
     },
     source: "adapter_default",
