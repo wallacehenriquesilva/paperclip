@@ -4,7 +4,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildCodexCliOverrideFlags,
+  buildCodexMcpOverrides,
   bundleDirectoryFor,
+  cleanupMcpBundle,
   prepareMcpBundle,
   prepareMcpWorkspaceConfig,
   readResolvedMcpServers,
@@ -112,10 +114,11 @@ describe("prepareMcpBundle", () => {
           type: "stdio",
           command: "npx",
           args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-          env: { LOG_LEVEL: "info" },
+          env: { LOG_LEVEL: "${PAPERCLIP_MCP_SECRET_FILESYSTEM_LOG_LEVEL}" },
         },
       },
     });
+    expect(result!.env).toEqual({ PAPERCLIP_MCP_SECRET_FILESYSTEM_LOG_LEVEL: "info" });
   });
 
   it("writes Claude config with http transport when transport is streamable_http", async () => {
@@ -132,10 +135,88 @@ describe("prepareMcpBundle", () => {
         figma: {
           type: "http",
           url: "https://mcp.figma.com",
-          headers: { authorization: "Bearer tok-xyz" },
+          headers: { authorization: "${PAPERCLIP_MCP_SECRET_FIGMA_HDR_AUTHORIZATION}" },
         },
       },
     });
+    expect(written).not.toContain("tok-xyz");
+    expect(result!.env).toEqual({ PAPERCLIP_MCP_SECRET_FIGMA_HDR_AUTHORIZATION: "Bearer tok-xyz" });
+  });
+
+  it("never writes resolved secret values to the claude bundle", async () => {
+    const workspace = await makeTempWorkspace("mcp-bundle-claude-secret-");
+    const result = await prepareMcpBundle({
+      adapter: "claude",
+      workspaceCwd: workspace,
+      resolvedServers: [
+        { ...SAMPLE_SERVER, key: "github", env: { GITHUB_TOKEN: "ghp_live_value", EMPTY: "" } },
+      ],
+    });
+    const written = await fs.readFile(result!.configFilePath, "utf8");
+    expect(written).not.toContain("ghp_live_value");
+    expect(JSON.parse(written).mcpServers.github.env).toEqual({
+      GITHUB_TOKEN: "${PAPERCLIP_MCP_SECRET_GITHUB_GITHUB_TOKEN}",
+      EMPTY: "",
+    });
+    expect(result!.env).toEqual({ PAPERCLIP_MCP_SECRET_GITHUB_GITHUB_TOKEN: "ghp_live_value" });
+  });
+
+  it("disambiguates env var names that collide after normalization", async () => {
+    const workspace = await makeTempWorkspace("mcp-bundle-claude-collide-");
+    const result = await prepareMcpBundle({
+      adapter: "claude",
+      workspaceCwd: workspace,
+      resolvedServers: [
+        { ...SAMPLE_SERVER, key: "my-server", env: { TOKEN: "a" } },
+        { ...SAMPLE_SERVER, id: "srv-2", key: "my_server", env: { TOKEN: "b" } },
+      ],
+    });
+    expect(result!.env).toEqual({
+      PAPERCLIP_MCP_SECRET_MY_SERVER_TOKEN: "a",
+      PAPERCLIP_MCP_SECRET_MY_SERVER_TOKEN_2: "b",
+    });
+  });
+
+  it("writes a per-run, owner-only file and removes the legacy shared mcp.json", async () => {
+    const workspace = await makeTempWorkspace("mcp-bundle-claude-run-");
+    const bundleDir = bundleDirectoryFor("claude", workspace);
+    await fs.mkdir(bundleDir, { recursive: true });
+    const legacyPath = path.join(bundleDir, "mcp.json");
+    await fs.writeFile(legacyPath, '{"mcpServers":{"github":{"env":{"GITHUB_TOKEN":"ghp_old"}}}}');
+
+    const result = await prepareMcpBundle({
+      adapter: "claude",
+      workspaceCwd: workspace,
+      resolvedServers: [SAMPLE_SERVER],
+      runId: "run-123",
+    });
+    expect(result!.bundleFilename).toBe("mcp-run-123.json");
+    expect(result!.configFilePath).toBe(path.join(bundleDir, "mcp-run-123.json"));
+    await expect(fs.stat(legacyPath)).rejects.toThrow();
+    if (process.platform !== "win32") {
+      const stat = await fs.stat(result!.configFilePath);
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
+
+    await cleanupMcpBundle(result);
+    await expect(fs.stat(result!.configFilePath)).rejects.toThrow();
+  });
+
+  it("removes the legacy shared mcp.json even when no servers are attached", async () => {
+    const workspace = await makeTempWorkspace("mcp-bundle-claude-legacy-");
+    const bundleDir = bundleDirectoryFor("claude", workspace);
+    await fs.mkdir(bundleDir, { recursive: true });
+    const legacyPath = path.join(bundleDir, "mcp.json");
+    await fs.writeFile(legacyPath, "{}");
+
+    const result = await prepareMcpBundle({
+      adapter: "claude",
+      workspaceCwd: workspace,
+      resolvedServers: [],
+      runId: "run-123",
+    });
+    expect(result).toBeNull();
+    await expect(fs.stat(legacyPath)).rejects.toThrow();
   });
 
   it("writes Codex TOML with transport=http + url + headers table for HTTP MCP", async () => {
@@ -316,5 +397,59 @@ describe("buildCodexCliOverrideFlags", () => {
       "-c", 'mcp_servers.figma.url="https://mcp.figma.com"',
       "-c", 'mcp_servers.figma.headers.authorization="Bearer tok-xyz"',
     ]);
+  });
+});
+
+describe("buildCodexMcpOverrides", () => {
+  it("returns no flags or env when no servers are resolved", () => {
+    expect(buildCodexMcpOverrides([])).toEqual({ flags: [], env: {}, inlinedEnvKeys: [] });
+  });
+
+  it("forwards stdio env through env_vars instead of inlining values", () => {
+    const overrides = buildCodexMcpOverrides([
+      { ...SAMPLE_SERVER, key: "github", env: { GITHUB_TOKEN: "ghp_live_value" } },
+    ]);
+    expect(overrides.flags.join(" ")).not.toContain("ghp_live_value");
+    expect(overrides.flags).toContain('mcp_servers.github.env_vars=["GITHUB_TOKEN"]');
+    expect(overrides.flags).toContain('mcp_servers.github.command="npx"');
+    expect(overrides.env).toEqual({ GITHUB_TOKEN: "ghp_live_value" });
+    expect(overrides.inlinedEnvKeys).toEqual([]);
+  });
+
+  it("forwards HTTP headers through env_http_headers", () => {
+    const overrides = buildCodexMcpOverrides([SAMPLE_HTTP_SERVER]);
+    expect(overrides.flags.join(" ")).not.toContain("tok-xyz");
+    expect(overrides.flags).toContain(
+      'mcp_servers.figma.env_http_headers={ "authorization" = "PAPERCLIP_MCP_SECRET_FIGMA_HDR_AUTHORIZATION" }',
+    );
+    expect(overrides.env).toEqual({ PAPERCLIP_MCP_SECRET_FIGMA_HDR_AUTHORIZATION: "Bearer tok-xyz" });
+  });
+
+  it("inlines reserved names and values that conflict with the Codex env", () => {
+    const overrides = buildCodexMcpOverrides(
+      [
+        {
+          ...SAMPLE_SERVER,
+          key: "tools",
+          env: { PATH: "/custom/bin", API_TOKEN: "server-value", SHARED: "same" },
+        },
+      ],
+      { API_TOKEN: "codex-value", SHARED: "same" },
+    );
+    expect(overrides.flags).toContain('mcp_servers.tools.env.PATH="/custom/bin"');
+    expect(overrides.flags).toContain('mcp_servers.tools.env.API_TOKEN="server-value"');
+    expect(overrides.flags).toContain('mcp_servers.tools.env_vars=["SHARED"]');
+    expect(overrides.env).toEqual({ SHARED: "same" });
+    expect(overrides.inlinedEnvKeys).toEqual(["tools.PATH", "tools.API_TOKEN"]);
+  });
+
+  it("inlines a second server's env when it reuses a forwarded name with another value", () => {
+    const overrides = buildCodexMcpOverrides([
+      { ...SAMPLE_SERVER, key: "a", env: { TOKEN: "one" } },
+      { ...SAMPLE_SERVER, id: "srv-b", key: "b", env: { TOKEN: "two" } },
+    ]);
+    expect(overrides.env).toEqual({ TOKEN: "one" });
+    expect(overrides.flags).toContain('mcp_servers.b.env.TOKEN="two"');
+    expect(overrides.inlinedEnvKeys).toEqual(["b.TOKEN"]);
   });
 });

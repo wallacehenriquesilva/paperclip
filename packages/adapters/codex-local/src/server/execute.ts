@@ -48,7 +48,7 @@ import { pathExists, prepareManagedCodexHome, resolveManagedCodexHomeDir, resolv
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
 import {
-  buildCodexCliOverrideFlags,
+  buildCodexMcpOverrides,
   readResolvedMcpServers,
 } from "@paperclipai/adapter-utils/mcp-bundle";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -682,11 +682,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const resolvedMcpServers = readResolvedMcpServers(config);
-  const mcpOverrideFlags = buildCodexCliOverrideFlags(resolvedMcpServers);
+  // Env/header values reach the MCP servers through the Codex process env
+  // (env_vars / env_http_headers), never argv, which leaks via ps and run metadata.
+  const mcpOverrides = buildCodexMcpOverrides(resolvedMcpServers, runtimeEnv);
+  const mcpOverrideFlags = mcpOverrides.flags;
+  Object.assign(env, mcpOverrides.env);
   if (mcpOverrideFlags.length > 0) {
     await onLog(
       "stdout",
       `[paperclip] Injecting ${resolvedMcpServers.length} MCP server${resolvedMcpServers.length === 1 ? "" : "s"} into Codex via -c overrides.\n`,
+    );
+  }
+  if (mcpOverrides.inlinedEnvKeys.length > 0) {
+    await onLog(
+      "stderr",
+      `[paperclip] Warning: MCP env ${mcpOverrides.inlinedEnvKeys.join(", ")} could not be forwarded via the Codex environment (reserved name or conflicting value) and was passed inline as a -c override.\n`,
     );
   }
 

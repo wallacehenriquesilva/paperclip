@@ -24,6 +24,11 @@ export interface PrepareMcpBundleInput {
   adapter: McpAdapterFormat;
   workspaceCwd: string;
   resolvedServers: ResolvedMcpServerEntry[];
+  /**
+   * When set, the bundle is written to a per-run file (`mcp-<runId>.json`) so
+   * concurrent runs sharing a workspace never read or delete each other's file.
+   */
+  runId?: string;
   onLog?: (channel: "stdout" | "stderr", line: string) => void | Promise<void>;
 }
 
@@ -34,6 +39,66 @@ export interface PrepareMcpBundleResult {
   cliFlags: string[];
   serverCount: number;
   format: McpAdapterFormat;
+  /**
+   * Env vars the caller must merge into the adapter process env. For Claude
+   * the config file only holds `${VAR}` references; the values live here so
+   * resolved secrets never touch disk.
+   */
+  env: Record<string, string>;
+}
+
+/** Prefix for env vars carrying MCP secret values; matches log redaction (`secret`). */
+const MCP_SECRET_ENV_PREFIX = "PAPERCLIP_MCP_SECRET_";
+
+function envVarSegment(value: string): string {
+  const segment = value.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return segment.length > 0 ? segment : "X";
+}
+
+function allocateSecretEnvVar(used: Set<string>, ...parts: string[]): string {
+  const base = `${MCP_SECRET_ENV_PREFIX}${parts.map(envVarSegment).join("_")}`;
+  let name = base;
+  for (let suffix = 2; used.has(name); suffix += 1) name = `${base}_${suffix}`;
+  used.add(name);
+  return name;
+}
+
+/**
+ * Moves every env and header value out of the server entries into env vars,
+ * leaving `${VAR}` references that Claude Code expands at load time. Values are
+ * all moved (not just "secret-looking" ones) because the server has already
+ * resolved secret references to plain strings by the time they reach us.
+ */
+function externalizeClaudeServerValues(servers: ResolvedMcpServerEntry[]): {
+  servers: ResolvedMcpServerEntry[];
+  env: Record<string, string>;
+} {
+  const env: Record<string, string> = {};
+  const used = new Set<string>();
+  const externalized = servers.map((server) => {
+    const serverEnv: Record<string, string> = {};
+    for (const [envKey, value] of Object.entries(server.env)) {
+      if (value.length === 0) {
+        serverEnv[envKey] = value;
+        continue;
+      }
+      const envVar = allocateSecretEnvVar(used, server.key, envKey);
+      env[envVar] = value;
+      serverEnv[envKey] = `\${${envVar}}`;
+    }
+    const headers: Record<string, string> = {};
+    for (const [headerKey, value] of Object.entries(server.headers)) {
+      if (value.length === 0) {
+        headers[headerKey] = value;
+        continue;
+      }
+      const envVar = allocateSecretEnvVar(used, server.key, "HDR", headerKey);
+      env[envVar] = value;
+      headers[headerKey] = `\${${envVar}}`;
+    }
+    return { ...server, env: serverEnv, headers };
+  });
+  return { servers: externalized, env };
 }
 
 /**
@@ -197,16 +262,14 @@ function buildContent(adapter: McpAdapterFormat, servers: ResolvedMcpServerEntry
   }
 }
 
-function bundleFilename(adapter: McpAdapterFormat): string {
-  return adapter === "codex" ? "mcp.toml" : "mcp.json";
+function bundleFilename(adapter: McpAdapterFormat, runId?: string): string {
+  const extension = adapter === "codex" ? "toml" : "json";
+  const runSuffix = runId ? runId.replace(/[^A-Za-z0-9_-]/g, "") : "";
+  return runSuffix ? `mcp-${runSuffix}.${extension}` : `mcp.${extension}`;
 }
 
 export function bundleDirectoryFor(adapter: McpAdapterFormat, workspaceCwd: string): string {
   return path.resolve(workspaceCwd, ".paperclip-runtime", adapter, "mcp");
-}
-
-function bundleFilePath(adapter: McpAdapterFormat, workspaceCwd: string): string {
-  return path.join(bundleDirectoryFor(adapter, workspaceCwd), bundleFilename(adapter));
 }
 
 function cliFlagsFor(adapter: McpAdapterFormat, configPath: string): string[] {
@@ -230,12 +293,22 @@ function cliFlagsFor(adapter: McpAdapterFormat, configPath: string): string[] {
 export async function prepareMcpBundle(
   input: PrepareMcpBundleInput,
 ): Promise<PrepareMcpBundleResult | null> {
+  const bundleDir = bundleDirectoryFor(input.adapter, input.workspaceCwd);
+  // Older releases wrote resolved secrets in plain text to a shared mcp.json;
+  // drop it so existing workspaces are cleaned on their next run.
+  await fs.rm(path.join(bundleDir, bundleFilename(input.adapter)), { force: true });
+
   if (input.resolvedServers.length === 0) return null;
 
-  const configFilePath = bundleFilePath(input.adapter, input.workspaceCwd);
-  await fs.mkdir(path.dirname(configFilePath), { recursive: true });
-  const content = buildContent(input.adapter, input.resolvedServers);
-  await fs.writeFile(configFilePath, content, "utf8");
+  const { servers, env } =
+    input.adapter === "claude"
+      ? externalizeClaudeServerValues(input.resolvedServers)
+      : { servers: input.resolvedServers, env: {} };
+  const filename = bundleFilename(input.adapter, input.runId);
+  const configFilePath = path.join(bundleDir, filename);
+  await fs.mkdir(bundleDir, { recursive: true });
+  const content = buildContent(input.adapter, servers);
+  await fs.writeFile(configFilePath, content, { encoding: "utf8", mode: 0o600 });
 
   if (input.onLog) {
     await input.onLog(
@@ -246,12 +319,19 @@ export async function prepareMcpBundle(
 
   return {
     configFilePath,
-    bundleDir: bundleDirectoryFor(input.adapter, input.workspaceCwd),
-    bundleFilename: bundleFilename(input.adapter),
+    bundleDir,
+    bundleFilename: filename,
     cliFlags: cliFlagsFor(input.adapter, configFilePath),
     serverCount: input.resolvedServers.length,
     format: input.adapter,
+    env,
   };
+}
+
+/** Removes a bundle written by `prepareMcpBundle`. Safe to call with `null`. */
+export async function cleanupMcpBundle(bundle: PrepareMcpBundleResult | null): Promise<void> {
+  if (!bundle) return;
+  await fs.rm(bundle.configFilePath, { force: true });
 }
 
 export type McpWorkspaceConfigAdapter = "cursor" | "opencode" | "gemini";
@@ -321,6 +401,9 @@ function escapeTomlInlineValue(value: string): string {
  *   args.push(...flags);  // e.g. ["-c", "mcp_servers.foo.command=\"npx\"", ...]
  *
  * Returns an empty array when no servers are configured.
+ *
+ * @deprecated Inlines env/header values (often resolved secrets) into argv,
+ * where they show up in `ps` and run metadata. Use `buildCodexMcpOverrides`.
  */
 export function buildCodexCliOverrideFlags(servers: ResolvedMcpServerEntry[]): string[] {
   const out: string[] = [];
@@ -345,4 +428,97 @@ export function buildCodexCliOverrideFlags(servers: ResolvedMcpServerEntry[]): s
     }
   }
   return out;
+}
+
+/**
+ * Env var names Codex itself depends on. A stdio MCP env entry with one of
+ * these names is never forwarded through the Codex process env, since that
+ * would change how Codex runs; it stays inline instead.
+ */
+const CODEX_RESERVED_ENV_KEYS = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "SHELL",
+  "PWD",
+  "TMPDIR",
+  "LANG",
+  "NODE_OPTIONS",
+  "CODEX_HOME",
+]);
+
+function isCodexReservedEnvKey(key: string): boolean {
+  return CODEX_RESERVED_ENV_KEYS.has(key) || key.startsWith("LD_") || key.startsWith("DYLD_");
+}
+
+export interface CodexMcpOverrides {
+  /** `-c key=value` pairs to splice into the Codex argv. Carry no env/header values. */
+  flags: string[];
+  /** Env vars to merge into the Codex process env. */
+  env: Record<string, string>;
+  /**
+   * `<server>.<ENV_KEY>` entries that could not be forwarded (reserved name, or
+   * the same name already set to a different value) and were inlined instead.
+   */
+  inlinedEnvKeys: string[];
+}
+
+/**
+ * Builds Codex `-c` overrides that keep env and header values out of argv:
+ * stdio env goes through `env_vars` (Codex forwards those names from its own
+ * environment to the MCP server) and HTTP headers through `env_http_headers`.
+ * The values are returned in `env` for the caller to set on the Codex process.
+ *
+ * `baseEnv` is the env Codex will run with; an `env_vars` name already present
+ * there with a different value is inlined rather than overwritten.
+ */
+export function buildCodexMcpOverrides(
+  servers: ResolvedMcpServerEntry[],
+  baseEnv: Record<string, string | undefined> = {},
+): CodexMcpOverrides {
+  const flags: string[] = [];
+  const env: Record<string, string> = {};
+  const inlinedEnvKeys: string[] = [];
+  const usedSecretVars = new Set<string>();
+
+  for (const server of servers) {
+    const base = `mcp_servers.${server.key}`;
+    if (server.transport === "stdio") {
+      flags.push("-c", `${base}.command=${escapeTomlInlineValue(server.command)}`);
+      if (server.args.length > 0) {
+        const argList = server.args.map(escapeTomlInlineValue).join(", ");
+        flags.push("-c", `${base}.args=[${argList}]`);
+      }
+      const forwarded: string[] = [];
+      for (const [envKey, envValue] of Object.entries(server.env)) {
+        const existing = envKey in env ? env[envKey] : baseEnv[envKey];
+        const canForward =
+          !isCodexReservedEnvKey(envKey) && (existing === undefined || existing === envValue);
+        if (canForward) {
+          env[envKey] = envValue;
+          forwarded.push(envKey);
+        } else {
+          flags.push("-c", `${base}.env.${envKey}=${escapeTomlInlineValue(envValue)}`);
+          inlinedEnvKeys.push(`${server.key}.${envKey}`);
+        }
+      }
+      if (forwarded.length > 0) {
+        flags.push("-c", `${base}.env_vars=[${forwarded.map(escapeTomlInlineValue).join(", ")}]`);
+      }
+    } else {
+      const transportTag = server.transport === "streamable_http" ? "http" : "sse";
+      flags.push("-c", `${base}.transport=${escapeTomlInlineValue(transportTag)}`);
+      flags.push("-c", `${base}.url=${escapeTomlInlineValue(server.url ?? "")}`);
+      const headerEntries: string[] = [];
+      for (const [headerKey, headerValue] of Object.entries(server.headers)) {
+        const envVar = allocateSecretEnvVar(usedSecretVars, server.key, "HDR", headerKey);
+        env[envVar] = headerValue;
+        headerEntries.push(`${escapeTomlInlineValue(headerKey)} = ${escapeTomlInlineValue(envVar)}`);
+      }
+      if (headerEntries.length > 0) {
+        flags.push("-c", `${base}.env_http_headers={ ${headerEntries.join(", ")} }`);
+      }
+    }
+  }
+  return { flags, env, inlinedEnvKeys };
 }

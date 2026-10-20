@@ -60,6 +60,7 @@ import { resolveClaudeDesiredSkillNames } from "./skills.js";
 import { isBedrockModelId } from "./models.js";
 import { prepareClaudePromptBundle } from "./prompt-cache.js";
 import {
+  cleanupMcpBundle,
   prepareMcpBundle,
   readResolvedMcpServers,
 } from "@paperclipai/adapter-utils/mcp-bundle";
@@ -532,8 +533,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     adapter: "claude",
     workspaceCwd: cwd,
     resolvedServers: resolvedMcpServers,
+    runId,
     onLog,
   });
+  // The bundle file only holds ${VAR} references; Claude expands them from its env.
+  if (mcpBundle) Object.assign(env, mcpBundle.env);
   const useManagedRemoteClaudeConfig =
     executionTargetIsRemote &&
     adapterExecutionTargetUsesManagedHome(executionTarget) &&
@@ -1086,5 +1090,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       );
       await restoreRemoteWorkspace();
     }
+    await cleanupMcpBundle(mcpBundle);
   }
 }
