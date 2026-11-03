@@ -557,7 +557,7 @@ type IssueLike = {
   assigneeAdapterOverrides: Record<string, unknown> | null;
 };
 
-type RoutineLike = NonNullable<Awaited<ReturnType<ReturnType<typeof routineService>["getDetail"]>>>;
+type RoutineLike = Awaited<ReturnType<ReturnType<typeof routineService>["listForExport"]>>[number];
 
 type ImportPlanInternal = {
   preview: CompanyPortabilityPreviewResult;
@@ -3340,7 +3340,11 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const routinesSvc = routineService(db);
     const allProjectsRaw = include.projects || include.issues ? await projectsSvc.list(companyId) : [];
     const allProjects = allProjectsRaw.filter((project) => !project.archivedAt);
-    const allRoutines = include.issues ? await routinesSvc.list(companyId) : [];
+    // Routines are company configuration (Slack commands, schedules), not issue
+    // history, so they ship with agents/projects even when issues are excluded.
+    const allRoutines = include.issues || include.agents || include.projects
+      ? await routinesSvc.listForExport(companyId)
+      : [];
     const projectById = new Map(allProjects.map((project) => [project.id, project]));
     const projectByReference = new Map<string, typeof allProjects[number]>();
     for (const project of allProjects) {
@@ -3413,6 +3417,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       }
     }
 
+    // No issue or routine was picked explicitly: export every routine.
+    const exportAllRoutines = selectedIssues.size === 0 && selectedRoutines.size === 0;
+
     if (include.issues && selectedIssues.size === 0) {
       const allIssues = await issuesSvc.list(companyId);
       for (const issue of allIssues) {
@@ -3422,13 +3429,14 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           if (parentProject) selectedProjects.set(parentProject.id, parentProject);
         }
       }
-      if (selectedRoutines.size === 0) {
-        for (const routine of allRoutines) {
-          selectedRoutines.set(routine.id, routine);
-          if (routine.projectId) {
-            const parentProject = projectById.get(routine.projectId);
-            if (parentProject) selectedProjects.set(parentProject.id, parentProject);
-          }
+    }
+
+    if (exportAllRoutines) {
+      for (const routine of allRoutines) {
+        selectedRoutines.set(routine.id, routine);
+        if (routine.projectId) {
+          const parentProject = projectById.get(routine.projectId);
+          if (parentProject) selectedProjects.set(parentProject.id, parentProject);
         }
       }
     }
@@ -3438,11 +3446,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const selectedIssueRows = Array.from(selectedIssues.values())
       .filter((issue): issue is NonNullable<typeof issue> => issue != null)
       .sort((left, right) => (left.identifier ?? left.title).localeCompare(right.identifier ?? right.title));
-    const selectedRoutineSummaries = Array.from(selectedRoutines.values())
+    // listForExport already carries the triggers; no per-routine detail lookups.
+    const selectedRoutineRows = Array.from(selectedRoutines.values())
       .sort((left, right) => left.title.localeCompare(right.title));
-    const selectedRoutineRows = (
-      await Promise.all(selectedRoutineSummaries.map((routine) => routinesSvc.getDetail(routine.id)))
-    ).filter((routine): routine is RoutineLike => routine !== null);
 
     const taskSlugByIssueId = new Map<string, string>();
     const taskSlugByRoutineId = new Map<string, string>();
@@ -3545,7 +3551,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       }
 
       for (const inventoryEntry of skill.fileInventory) {
-        const fileDetail = await companySkills.readFile(companyId, skill.id, inventoryEntry.path).catch(() => null);
+        // companySkillRows came from listFull, which already refreshed the
+        // inventory; readFile would redo that refresh for every file.
+        const fileDetail = await companySkills.readSkillFile(skill, inventoryEntry.path).catch(() => null);
         if (!fileDetail) continue;
         const filePath = `${packageDir}/${inventoryEntry.path}`;
         files[filePath] = inventoryEntry.path === "SKILL.md"

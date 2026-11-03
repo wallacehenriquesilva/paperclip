@@ -1706,6 +1706,29 @@ export function routineService(
       }));
     },
 
+    /**
+     * Routines plus their triggers for company export. Two company-scoped queries
+     * served by the company_id indexes; unlike list/getDetail it skips the run,
+     * issue and plugin enrichment the export never reads.
+     */
+    listForExport: async (companyId: string) => {
+      const [rows, triggers] = await Promise.all([
+        db.select().from(routines).where(eq(routines.companyId, companyId)),
+        db
+          .select()
+          .from(routineTriggers)
+          .where(eq(routineTriggers.companyId, companyId))
+          .orderBy(asc(routineTriggers.createdAt)),
+      ]);
+      const triggersByRoutine = new Map<string, typeof triggers>();
+      for (const trigger of triggers) {
+        const existing = triggersByRoutine.get(trigger.routineId);
+        if (existing) existing.push(trigger);
+        else triggersByRoutine.set(trigger.routineId, [trigger]);
+      }
+      return rows.map((row) => ({ ...row, triggers: triggersByRoutine.get(row.id) ?? [] }));
+    },
+
     getDetail: async (id: string): Promise<RoutineDetail | null> => {
       const row = await getRoutineById(id);
       if (!row) return null;

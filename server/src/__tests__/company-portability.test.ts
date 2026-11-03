@@ -47,6 +47,9 @@ const issueSvc = {
 
 const routineSvc = {
   list: vi.fn().mockResolvedValue([]),
+  // Export reads routines through listForExport; serve the rows each test
+  // stubs on list so fixtures stay in one place.
+  listForExport: vi.fn(async (companyId: string) => routineSvc.list(companyId)),
   getDetail: vi.fn(),
   create: vi.fn(),
   update: vi.fn(),
@@ -58,6 +61,10 @@ const companySkillSvc = {
   list: vi.fn(),
   listFull: vi.fn(),
   readFile: vi.fn(),
+  // Export reads files off the already-loaded skill; route it through the
+  // readFile mock so each test only stubs file contents once.
+  readSkillFile: vi.fn(async (skill: { companyId: string; id: string }, relativePath: string) =>
+    companySkillSvc.readFile(skill.companyId, skill.id, relativePath)),
   importPackageFiles: vi.fn(),
 };
 
@@ -1523,7 +1530,7 @@ describe("company portability", () => {
     });
   });
 
-  it("exports routines as recurring task packages with Paperclip routine extensions", async () => {
+  it.each([true, false])("exports routines as recurring task packages with Paperclip routine extensions (issues: %s)", async (includeIssues) => {
     const portability = companyPortabilityService({} as any);
 
     projectSvc.list.mockResolvedValue([
@@ -1622,11 +1629,15 @@ describe("company portability", () => {
         company: true,
         agents: true,
         projects: true,
-        issues: true,
+        issues: includeIssues,
         skills: false,
       },
     });
 
+    // Routines must not depend on issues, and must not pay for per-routine
+    // detail lookups or the full issue listing when issues are excluded.
+    expect(routineSvc.getDetail).not.toHaveBeenCalled();
+    if (!includeIssues) expect(issueSvc.list).not.toHaveBeenCalled();
     expect(asTextFile(exported.files["tasks/monday-review/TASK.md"])).toContain('recurring: true');
     const extension = asTextFile(exported.files[".paperclip.yaml"]);
     expect(extension).toContain("routines:");
