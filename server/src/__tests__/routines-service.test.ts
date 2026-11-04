@@ -226,6 +226,28 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(allRoutines.map((entry) => entry.id)).toEqual(expect.arrayContaining([routine.id, otherRoutine.id]));
   });
 
+  it("lists routines with their triggers for export, scoped to the company", async () => {
+    const { companyId, routine, svc } = await seedFixture();
+    const schedule = await svc.createTrigger(routine.id, {
+      kind: "schedule",
+      cronExpression: "0 9 * * 1",
+      timezone: "UTC",
+    }, {});
+    const webhook = await svc.createTrigger(routine.id, {
+      kind: "webhook",
+      signingMode: "bearer",
+      replayWindowSec: 300,
+    }, {});
+    const other = await seedFixture();
+
+    const exported = await svc.listForExport(companyId);
+
+    expect(exported.map((entry) => entry.id)).toEqual([routine.id]);
+    expect(exported[0]!.triggers.map((trigger) => trigger.id)).toEqual([schedule.trigger.id, webhook.trigger.id]);
+    expect(exported[0]!.triggers[0]).toMatchObject({ kind: "schedule", cronExpression: "0 9 * * 1" });
+    expect((await svc.listForExport(other.companyId)).map((entry) => entry.id)).toEqual([other.routine.id]);
+  });
+
   it("creates a fresh execution issue when the previous routine issue is open but idle", async () => {
     const { companyId, issueSvc, routine, svc } = await seedFixture();
     const previousRunId = randomUUID();

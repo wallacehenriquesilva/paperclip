@@ -1786,7 +1786,15 @@ export function companySkillService(db: Db) {
     await ensureSkillInventoryCurrent(companyId);
     const skill = await getById(companyId, skillId);
     if (!skill) return null;
+    return readSkillFile(skill, relativePath);
+  }
 
+  /**
+   * Reads one file of an already-loaded skill. Unlike `readFile`, it does not
+   * refresh the company's skill inventory, so callers looping over many files
+   * (export, runtime materialization) pay for that refresh once, not per file.
+   */
+  async function readSkillFile(skill: CompanySkill, relativePath: string): Promise<CompanySkillFileDetail> {
     const normalizedPath = normalizePortablePath(relativePath || "SKILL.md");
     const fileEntry = skill.fileInventory.find((entry) => entry.path === normalizedPath);
     if (!fileEntry) {
@@ -2152,8 +2160,11 @@ export function companySkillService(db: Db) {
     await fs.rm(skillDir, { recursive: true, force: true });
     await fs.mkdir(skillDir, { recursive: true });
 
-    for (const entry of skill.fileInventory) {
-      const detail = await readFile(companyId, skill.id, entry.path).catch(() => null);
+    await ensureSkillInventoryCurrent(companyId);
+    const current = await getById(companyId, skill.id);
+    if (!current) return skillDir;
+    for (const entry of current.fileInventory) {
+      const detail = await readSkillFile(current, entry.path).catch(() => null);
       if (!detail) continue;
       const targetPath = path.resolve(skillDir, entry.path);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
@@ -2571,6 +2582,7 @@ export function companySkillService(db: Db) {
     detail,
     updateStatus,
     readFile,
+    readSkillFile,
     updateFile,
     createLocalSkill,
     deleteSkill,

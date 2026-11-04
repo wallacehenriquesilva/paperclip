@@ -267,6 +267,10 @@ function sortByChecked(nodes: FileTreeNode[], checkedFiles: Set<string>): FileTr
 
 const TASKS_PAGE_SIZE = 10;
 
+// Issues stay out of the export: on large companies listing and rendering
+// every issue keeps the preview from returning at all.
+const EXPORT_INCLUDE = { company: true, agents: true, projects: true, issues: false, mcpServers: true };
+
 /**
  * Paginate children of `tasks/` directories: show up to `limit` entries,
  * but always include children that are checked or match the search query.
@@ -684,7 +688,7 @@ export function CompanyExport() {
   const exportPreviewMutation = useMutation({
     mutationFn: () =>
       companiesApi.exportPreview(selectedCompanyId!, {
-        include: { company: true, agents: true, projects: true, issues: true, mcpServers: true },
+        include: EXPORT_INCLUDE,
         sidebarOrder,
       }),
     onSuccess: (result) => {
@@ -732,7 +736,7 @@ export function CompanyExport() {
   const downloadMutation = useMutation({
     mutationFn: () =>
       companiesApi.exportBundle(selectedCompanyId!, {
-        include: { company: true, agents: true, projects: true, issues: true, mcpServers: true },
+        include: EXPORT_INCLUDE,
         selectedFiles: Array.from(checkedFiles).sort(),
         sidebarOrder,
       }),

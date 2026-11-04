@@ -8,6 +8,7 @@ import { Link } from "@/lib/router";
 import { useTheme } from "../context/ThemeContext";
 import { mentionChipInlineStyle, parseMentionChipHref } from "../lib/mention-chips";
 import { issuesApi } from "../api/issues";
+import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import { parseIssueReferenceFromHref, remarkLinkIssueReferences } from "../lib/issue-reference";
 import { remarkSoftBreaks } from "../lib/remark-soft-breaks";
@@ -41,12 +42,19 @@ function MarkdownIssueLink({
   children: ReactNode;
 }) {
   const { data } = useQuery({
-    queryKey: queryKeys.issues.detail(issuePathId),
-    queryFn: () => issuesApi.get(issuePathId),
-    staleTime: 60_000,
+    // Deliberately NOT queryKeys.issues.detail: that key caches the full
+    // issue for IssueDetail, and this query stores `null` for misses.
+    queryKey: [...queryKeys.issues.detail(issuePathId), "reference"],
     // A run transcript can contain dozens of identifier-shaped tokens
-    // (PAP-123, ZED-24…) that don't correspond to real issues. Retrying each
-    // 404 three times amplifies the network spam visible in DevTools.
+    // (PAP-123, ZED-24…) that don't correspond to real issues. A 404 must be
+    // cached as data (`null`): an errored query ignores staleTime, so every
+    // remount or window focus refired one request per bogus token.
+    queryFn: () =>
+      issuesApi.get(issuePathId).catch((err) => {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }),
+    staleTime: 5 * 60_000,
     retry: false,
   });
 

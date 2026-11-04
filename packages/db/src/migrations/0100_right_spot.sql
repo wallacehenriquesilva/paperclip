@@ -1,0 +1,1 @@
+CREATE INDEX "routine_runs_company_routine_created_desc_idx" ON "routine_runs" USING btree ("company_id","routine_id","created_at" DESC NULLS LAST,"id" DESC NULLS LAST);

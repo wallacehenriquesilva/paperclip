@@ -157,6 +157,17 @@ export const routineRuns = pgTable(
   },
   (table) => ({
     companyRoutineIdx: index("routine_runs_company_routine_idx").on(table.companyId, table.routineId, table.createdAt),
+    // The routines list resolves each routine's latest run with
+    // DISTINCT ON (routine_id) ... ORDER BY routine_id, created_at DESC, id
+    // DESC — a mixed-direction sort the ascending index above cannot serve,
+    // so Postgres was sorting every run of the company (detoasting
+    // trigger_payload row by row). This index matches that order exactly.
+    companyRoutineCreatedDescIdx: index("routine_runs_company_routine_created_desc_idx").on(
+      table.companyId,
+      table.routineId,
+      table.createdAt.desc(),
+      table.id.desc(),
+    ),
     triggerIdx: index("routine_runs_trigger_idx").on(table.triggerId, table.createdAt),
     dispatchFingerprintIdx: index("routine_runs_dispatch_fingerprint_idx").on(table.routineId, table.dispatchFingerprint),
     linkedIssueIdx: index("routine_runs_linked_issue_idx").on(table.linkedIssueId),

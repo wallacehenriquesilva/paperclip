@@ -21,6 +21,14 @@ export const activityLog = pgTable(
   (table) => ({
     companyCreatedIdx: index("activity_log_company_created_idx").on(table.companyId, table.createdAt),
     runIdIdx: index("activity_log_run_id_idx").on(table.runId),
-    entityIdx: index("activity_log_entity_type_id_idx").on(table.entityType, table.entityId),
+    // agent_id is appended so the per-issue "did this agent act on this
+    // entity" EXISTS probe (issues ?participantAgentId=) resolves inside the
+    // index instead of filtering every activity row of the entity on the heap.
+    // The (entity_type, entity_id) prefix keeps serving the existing lookups.
+    entityIdx: index("activity_log_entity_type_id_idx").on(
+      table.entityType,
+      table.entityId,
+      table.agentId,
+    ),
   }),
 );

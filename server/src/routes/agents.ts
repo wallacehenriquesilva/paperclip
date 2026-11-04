@@ -3335,7 +3335,10 @@ export function agentRoutes(
     assertCompanyAccess(req, companyId);
     const agentId = req.query.agentId as string | undefined;
     const limitParam = req.query.limit as string | undefined;
-    const limit = limitParam ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 200)) : undefined;
+    // Always cap the page: without a default an agentId-filtered request used
+    // to return the agent's entire run history (tens of MB of JSON), stalling
+    // the database and the event loop for every other request in flight.
+    const limit = Math.max(1, Math.min(1000, (limitParam ? parseInt(limitParam, 10) : NaN) || 200));
     const runs = await heartbeat.list(companyId, agentId, limit);
     res.json(runs);
   });
