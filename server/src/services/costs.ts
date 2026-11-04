@@ -50,6 +50,47 @@ async function getMonthlySpendTotal(
 
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   const budgets = budgetService(db, budgetHooks);
+
+  // Postgres array literal for ids we read back from the database (uuids), so a
+  // large tree binds as one parameter instead of one placeholder per id.
+  const pgArrayLiteral = (values: string[]) => `{${values.join(",")}}`;
+
+  // Runs tied to an issue tree, found with two indexed lookups: the per-issue
+  // context index on heartbeat_runs and the (entity_type, entity_id) index on
+  // activity_log. The tree ids are resolved first so the planner sees the real
+  // list size; with a recursive CTE it overestimated the tree (73k vs 601 nodes)
+  // and fell back to scanning every run and activity row of the company.
+  async function runIdsForIssueTree(companyId: string, treeIds: string[]): Promise<string[]> {
+    if (treeIds.length === 0) return [];
+    const treeArray = pgArrayLiteral(treeIds);
+    // The per-issue half is a LATERAL lookup fenced with OFFSET 0: with
+    // `= ANY(tree)` (or an unfenced lateral) the planner estimates ~1.5k runs per
+    // issue and switches to a sequential scan of heartbeat_runs (>20s on a
+    // 601-issue tree in production). The fence keeps one index probe per issue.
+    const rows = await db.execute(sql`
+      SELECT r.run_id
+      FROM unnest(${treeArray}::text[]) AS tree(issue_id)
+      CROSS JOIN LATERAL (
+        SELECT hr.id AS run_id
+        FROM ${heartbeatRuns} hr
+        WHERE hr.company_id = ${companyId}
+          AND (hr.context_snapshot ->> 'issueId') = tree.issue_id
+          AND (hr.context_snapshot ->> 'issueId') IS NOT NULL
+        OFFSET 0
+      ) r
+      UNION
+      SELECT al.run_id
+      FROM ${activityLog} al
+      WHERE al.company_id = ${companyId}
+        AND al.entity_type = 'issue'
+        AND al.entity_id = ANY(${treeArray}::text[])
+        AND al.run_id IS NOT NULL
+    `);
+    return (Array.isArray(rows) ? rows : [])
+      .map((row: { run_id?: string | null }) => (row?.run_id ? String(row.run_id) : ""))
+      .filter(Boolean);
+  }
+
   const service = {
     createEvent: async (companyId: string, data: Omit<typeof costEvents.$inferInsert, "companyId">) => {
       const agent = await db
@@ -193,34 +234,34 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         )
       `;
 
-      const runSummarySql = sql`
-        WITH RECURSIVE issue_tree(id) AS (
-          ${cteSeedText}
-          UNION ALL
-          SELECT (${childIssues.id})::text
-          FROM ${issues} ${childIssues}
-          JOIN issue_tree ON (${childIssues.parentId})::text = issue_tree.id
-          WHERE ${childIssues.companyId} = ${companyId}
-            AND ${childIssues.hiddenAt} IS NULL
-        )
-        SELECT
-          count(distinct ${heartbeatRuns.id})::int AS "runCount",
-          coalesce(sum(extract(epoch from (coalesce(${heartbeatRuns.finishedAt}, now()) - ${heartbeatRuns.startedAt})) * 1000), 0)::double precision AS "runtimeMs"
-        FROM ${heartbeatRuns}
-        WHERE ${heartbeatRuns.companyId} = ${companyId}
-          AND ${heartbeatRuns.startedAt} IS NOT NULL
-          AND (
-            ${heartbeatRuns.contextSnapshot} ->> 'issueId' IN (SELECT id FROM issue_tree)
-            OR EXISTS (
-              SELECT 1
-              FROM ${activityLog}
-              JOIN issue_tree ON ${activityLog.entityId} = issue_tree.id
-              WHERE ${activityLog.companyId} = ${companyId}
-                AND ${activityLog.entityType} = 'issue'
-                AND ${activityLog.runId} = ${heartbeatRuns.id}
-            )
+      const runSummary = async () => {
+        const treeRows = await db.execute(sql`
+          WITH RECURSIVE issue_tree(id) AS (
+            ${cteSeedText}
+            UNION ALL
+            SELECT (${childIssues.id})::text
+            FROM ${issues} ${childIssues}
+            JOIN issue_tree ON (${childIssues.parentId})::text = issue_tree.id
+            WHERE ${childIssues.companyId} = ${companyId}
+              AND ${childIssues.hiddenAt} IS NULL
           )
-      `;
+          SELECT id FROM issue_tree
+        `);
+        const treeIds = (Array.isArray(treeRows) ? treeRows : [])
+          .map((row: { id?: string | null }) => (row?.id ? String(row.id) : ""))
+          .filter(Boolean);
+        const runIds = await runIdsForIssueTree(companyId, treeIds);
+        if (runIds.length === 0) return [];
+        return db.execute(sql`
+          SELECT
+            count(distinct ${heartbeatRuns.id})::int AS "runCount",
+            coalesce(sum(extract(epoch from (coalesce(${heartbeatRuns.finishedAt}, now()) - ${heartbeatRuns.startedAt})) * 1000), 0)::double precision AS "runtimeMs"
+          FROM ${heartbeatRuns}
+          WHERE ${heartbeatRuns.companyId} = ${companyId}
+            AND ${heartbeatRuns.startedAt} IS NOT NULL
+            AND ${heartbeatRuns.id} = ANY(${pgArrayLiteral(runIds)}::uuid[])
+        `);
+      };
 
       // Run cost-event aggregation and run-duration aggregation in parallel.
       // They're separate queries because cost_events fan out per-event and
@@ -249,7 +290,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
               issueTreeCondition,
             ),
           ),
-        db.execute(runSummarySql),
+        runSummary(),
       ]);
 
       const costRow = costRowResult[0];
@@ -310,21 +351,16 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       // is only used to *discover* relevant runs; a run with contextSnapshot
       // missing the issue but linked via activity_log to the root lands in
       // "self". Each run is counted exactly once.
-      const rows = await db.execute(sql`
-        WITH RECURSIVE issue_tree(id, is_root) AS (
-          SELECT (${issues.id})::text AS id, true AS is_root
-          FROM ${issues}
-          WHERE ${issues.companyId} = ${companyId}
-            AND ${issues.id} = ${issueId}
-            AND ${issues.hiddenAt} IS NULL
-          UNION ALL
-          SELECT (${childIssues.id})::text, false
-          FROM ${issues} ${childIssues}
-          JOIN issue_tree ON (${childIssues.parentId})::text = issue_tree.id
-          WHERE ${childIssues.companyId} = ${companyId}
-            AND ${childIssues.hiddenAt} IS NULL
-        ),
-        linked_runs AS (
+      // The tree only exists when the root is visible; the subtree is its descendants.
+      const [visibleRoot] = await db
+        .select({ id: issues.id })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), isNull(issues.hiddenAt)))
+        .limit(1);
+      const subtreeIds = visibleRoot ? [...descendantIds] : [];
+      const runIds = visibleRoot ? await runIdsForIssueTree(companyId, [issueId, ...subtreeIds]) : [];
+      const rows = runIds.length === 0 ? [] : await db.execute(sql`
+        WITH linked_runs AS (
           SELECT
             ${heartbeatRuns.id} AS run_id,
             ${heartbeatRuns.usageJson} AS usage_json,
@@ -343,17 +379,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           FROM ${heartbeatRuns}
           WHERE ${heartbeatRuns.companyId} = ${companyId}
             AND ${heartbeatRuns.startedAt} IS NOT NULL
-            AND (
-              (${heartbeatRuns.contextSnapshot} ->> 'issueId') IN (SELECT id FROM issue_tree)
-              OR EXISTS (
-                SELECT 1
-                FROM ${activityLog}
-                JOIN issue_tree ON ${activityLog.entityId}::text = issue_tree.id
-                WHERE ${activityLog.companyId} = ${companyId}
-                  AND ${activityLog.entityType} = 'issue'
-                  AND ${activityLog.runId} = ${heartbeatRuns.id}
-              )
-            )
+            AND ${heartbeatRuns.id} = ANY(${pgArrayLiteral(runIds)}::uuid[])
         ),
         bucketed_runs AS (
           SELECT
@@ -364,7 +390,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
             finished_at,
             CASE
               WHEN ctx_issue_id = ${issueId} THEN 'self'
-              WHEN ctx_issue_id IN (SELECT id FROM issue_tree WHERE NOT is_root) THEN 'subtree'
+              WHEN ctx_issue_id = ANY(${pgArrayLiteral(subtreeIds)}::text[]) THEN 'subtree'
               WHEN activity_touched_root THEN 'self'
               ELSE 'subtree'
             END AS bucket

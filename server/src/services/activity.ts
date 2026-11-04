@@ -381,6 +381,31 @@ export function activityService(db: Db) {
 
     runsForIssue: async (companyId: string, issueId: string) => {
       scheduleRunLivenessBackfill(companyId, issueId);
+      // Find the issue's runs with two indexed lookups (per-issue context index and
+      // activity_log entity index) instead of `context = issue OR EXISTS(activity)`,
+      // which no index can serve: that form scanned every run of the company.
+      const candidateRows = await db.execute(sql`
+        SELECT id FROM (
+          SELECT hr.id, hr.created_at
+          FROM ${heartbeatRuns} hr
+          WHERE hr.company_id = ${companyId}
+            AND (hr.context_snapshot ->> 'issueId') = ${issueId}
+          UNION
+          SELECT hr.id, hr.created_at
+          FROM ${activityLog} al
+          JOIN ${heartbeatRuns} hr ON hr.id = al.run_id
+          WHERE al.company_id = ${companyId}
+            AND al.entity_type = 'issue'
+            AND al.entity_id = ${issueId}
+            AND hr.company_id = ${companyId}
+        ) candidate_runs
+        ORDER BY created_at DESC
+        LIMIT ${MAX_RUNS_FOR_ISSUE}
+      `);
+      const candidateRunIds = (Array.isArray(candidateRows) ? candidateRows : [])
+        .map((row: { id?: string | null }) => (row?.id ? String(row.id) : ""))
+        .filter(Boolean);
+      if (candidateRunIds.length === 0) return [];
       const runs = await db
         .select({
           runId: heartbeatRuns.id,
@@ -416,17 +441,7 @@ export function activityService(db: Db) {
         .where(
           and(
             eq(heartbeatRuns.companyId, companyId),
-            or(
-              sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
-              sql`exists (
-                select 1
-                from ${activityLog}
-                where ${activityLog.companyId} = ${companyId}
-                  and ${activityLog.entityType} = 'issue'
-                  and ${activityLog.entityId} = ${issueId}
-                  and ${activityLog.runId} = ${heartbeatRuns.id}
-              )`,
-            ),
+            inArray(heartbeatRuns.id, candidateRunIds),
           ),
         )
         .orderBy(desc(heartbeatRuns.createdAt))
