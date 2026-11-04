@@ -422,7 +422,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
         ),
       )
-      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+      // Order by an expression, not the bare column: with `created_at DESC LIMIT 1`
+      // Postgres walks heartbeat_runs_company_created_idx backwards and detoasts every
+      // run's context_snapshot until one matches, which scans the whole company (minutes)
+      // for issues whose last run is old or that have none. The expression forces the
+      // per-issue index (heartbeat_runs_company_context_issue_id_idx) plus a tiny sort.
+      .orderBy(sql`(${heartbeatRuns.createdAt} + interval '0 seconds') desc`, desc(heartbeatRuns.id))
       .limit(1)
       .then((rows) => rows[0] ?? null);
   }
