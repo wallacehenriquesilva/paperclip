@@ -411,6 +411,53 @@ export function ProjectDetail() {
     },
   });
 
+  const cancelOpenIssuesJobKey = queryKeys.projects.cancelOpenIssuesJob(project?.id ?? "__none__");
+  const cancelOpenIssuesJobQuery = useQuery({
+    queryKey: cancelOpenIssuesJobKey,
+    queryFn: () => projectsApi.getCancelOpenIssuesJob(project!.id, resolvedCompanyId ?? lookupCompanyId),
+    enabled: !!project?.id && activeTab === "configuration",
+    refetchInterval: (query) => (query.state.data?.status === "running" ? 2_000 : false),
+  });
+  const cancelOpenIssuesJob = cancelOpenIssuesJobQuery.data ?? null;
+
+  const startCancelOpenIssues = useMutation({
+    mutationFn: () => projectsApi.startCancelOpenIssues(project!.id, resolvedCompanyId ?? lookupCompanyId),
+    onSuccess: (job) => {
+      queryClient.setQueryData(cancelOpenIssuesJobKey, job);
+    },
+    onError: () => {
+      pushToast({ title: "Failed to start cancelling open issues", tone: "error" });
+    },
+  });
+
+  // Toast + refresh issue lists once, when a job this page was watching leaves "running".
+  const watchedCancelJobRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!cancelOpenIssuesJob) return;
+    if (cancelOpenIssuesJob.status === "running") {
+      watchedCancelJobRef.current = cancelOpenIssuesJob.id;
+      return;
+    }
+    if (watchedCancelJobRef.current !== cancelOpenIssuesJob.id) return;
+    watchedCancelJobRef.current = null;
+    if (resolvedCompanyId) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(resolvedCompanyId) });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.issues.listByProject(resolvedCompanyId, cancelOpenIssuesJob.projectId),
+      });
+      queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(resolvedCompanyId) });
+    }
+    if (cancelOpenIssuesJob.status === "failed") {
+      pushToast({ title: "Cancelling open issues failed", body: cancelOpenIssuesJob.error ?? undefined, tone: "error" });
+      return;
+    }
+    const n = cancelOpenIssuesJob.cancelledCount;
+    pushToast({
+      title: n === 0 ? "No open issues to cancel" : `Cancelled ${n.toLocaleString()} open ${n === 1 ? "issue" : "issues"}`,
+      tone: "success",
+    });
+  }, [cancelOpenIssuesJob, pushToast, queryClient, resolvedCompanyId]);
+
   const uploadImage = useMutation({
     mutationFn: async (file: File) => {
       if (!resolvedCompanyId) throw new Error("No company selected");
@@ -763,6 +810,9 @@ export function ProjectDetail() {
             getFieldSaveState={(field) => fieldSaveStates[field] ?? "idle"}
             onArchive={(archived) => archiveProject.mutate(archived)}
             archivePending={archiveProject.isPending}
+            onCancelOpenIssues={() => startCancelOpenIssues.mutate()}
+            cancelOpenIssuesPending={startCancelOpenIssues.isPending}
+            cancelOpenIssuesJob={cancelOpenIssuesJob}
           />
         </div>
       )}

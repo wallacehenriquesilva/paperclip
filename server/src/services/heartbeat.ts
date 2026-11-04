@@ -6675,7 +6675,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
         }
       } else {
-        await releaseIssueExecutionAndPromote(finalizedRun);
+        try {
+          await releaseIssueExecutionAndPromote(finalizedRun);
+        } catch (err) {
+          // One run's promotion failure must not abort the reap loop — the
+          // remaining orphaned runs still need to be finalized this tick.
+          logger.warn(
+            { err, runId: finalizedRun.id },
+            "failed to release/promote issue execution for reaped run; continuing",
+          );
+        }
       }
 
       await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
@@ -8363,7 +8372,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
     const recoveryAgentNameKey = normalizeAgentNameKey(recoveryAgent?.name);
 
-    const promotionResult = await db.transaction(async (tx) => {
+    const runPromotionTransaction = () => db.transaction(async (tx) => {
       if (contextIssueId) {
         await tx.execute(
           sql`select id from issues where company_id = ${run.companyId} and id = ${contextIssueId} for update`,
@@ -8732,6 +8741,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         run: queuedRun,
       };
     });
+
+    let promotionResult: Awaited<ReturnType<typeof runPromotionTransaction>>;
+    try {
+      promotionResult = await runPromotionTransaction();
+    } catch (err) {
+      // A duplicate open issue from the same routine-execution origin already
+      // holds the execution slot (issues_open_routine_execution_uq): promoting
+      // this sibling can never succeed, and letting the violation propagate
+      // aborted the caller — in the periodic reap loop that meant every other
+      // orphaned run stayed unreaped, tick after tick. The surviving sibling
+      // keeps its run; the duplicate issue has to be closed on the board.
+      if (err instanceof Error && String(err.message).includes("issues_open_routine_execution_uq")) {
+        logger.warn(
+          { err, runId: run.id, issueId: contextIssueId ?? null },
+          "skipping issue execution promotion: another open issue from the same routine execution already holds the slot",
+        );
+        return;
+      }
+      throw err;
+    }
 
     if (promotionResult?.kind === "blocked") {
       await recovery.escalateStrandedAssignedIssue({

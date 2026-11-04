@@ -17,6 +17,7 @@ export {
   refreshIssueContinuationSummary,
 } from "./issue-continuation-summary.js";
 export { projectService } from "./projects.js";
+export { projectIssueBulkCancelService } from "./project-issue-bulk-cancel.js";
 export {
   clampIssueListLimit,
   ISSUE_LIST_DEFAULT_LIMIT,

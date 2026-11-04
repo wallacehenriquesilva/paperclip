@@ -68,6 +68,7 @@ import { redactSensitiveText } from "../redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { getDefaultCompanyGoal } from "./goals.js";
+import { getDefaultCompanyProject } from "./projects.js";
 import {
   isVerifiedIssueTreeControlInteractionWake,
   issueTreeControlService,
@@ -4066,6 +4067,18 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
+        // Top-level issues created without any project or workspace targeting
+        // fall back to the company's default project when one is configured.
+        if (
+          issueData.projectId == null &&
+          issueData.parentId == null &&
+          inheritExecutionWorkspaceFromIssueId == null &&
+          issueData.projectWorkspaceId == null &&
+          issueData.executionWorkspaceId == null
+        ) {
+          const defaultProject = await getDefaultCompanyProject(tx, companyId);
+          if (defaultProject) issueData.projectId = defaultProject.id;
+        }
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;

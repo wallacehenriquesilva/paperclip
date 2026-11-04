@@ -536,6 +536,7 @@ function existingProject(): Project {
     pauseReason: null,
     pausedAt: null,
     executionWorkspacePolicy: null,
+    isDefault: false,
     codebase: {
       workspaceId: null,
       repoUrl: null,

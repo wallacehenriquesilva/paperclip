@@ -115,7 +115,7 @@ export type {
   AdapterEnvironmentTestResult,
 } from "./agent.js";
 export type { AssetImage } from "./asset.js";
-export type { Project, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectManagedByPlugin, ProjectWorkspace } from "./project.js";
+export type { Project, ProjectCancelOpenIssuesJob, ProjectCancelOpenIssuesJobStatus, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectManagedByPlugin, ProjectWorkspace } from "./project.js";
 export type {
   CompanySearchHighlight,
   CompanySearchIssueSummary,

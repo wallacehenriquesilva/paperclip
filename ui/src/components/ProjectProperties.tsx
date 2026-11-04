@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Project } from "@paperclipai/shared";
+import type { Project, ProjectCancelOpenIssuesJob } from "@paperclipai/shared";
 import { StatusBadge } from "./StatusBadge";
 import { cn, formatDate } from "../lib/utils";
 import { environmentsApi } from "../api/environments";
@@ -16,7 +16,7 @@ import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { AlertCircle, Archive, ArchiveRestore, Check, ExternalLink, Github, Loader2, Plus, Trash2, X } from "lucide-react";
+import { AlertCircle, Archive, ArchiveRestore, Ban, Check, ExternalLink, Github, Loader2, Plus, Trash2, X } from "lucide-react";
 import { ChoosePathButton } from "./PathInstructionsModal";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { DraftInput } from "./agent-config-primitives";
@@ -38,6 +38,9 @@ interface ProjectPropertiesProps {
   getFieldSaveState?: (field: ProjectConfigFieldKey) => ProjectFieldSaveState;
   onArchive?: (archived: boolean) => void;
   archivePending?: boolean;
+  onCancelOpenIssues?: () => void;
+  cancelOpenIssuesPending?: boolean;
+  cancelOpenIssuesJob?: ProjectCancelOpenIssuesJob | null;
 }
 
 export type ProjectFieldSaveState = "idle" | "saving" | "saved" | "error";
@@ -45,6 +48,7 @@ export type ProjectConfigFieldKey =
   | "name"
   | "description"
   | "status"
+  | "is_default"
   | "goals"
   | "env"
   | "execution_workspace_enabled"
@@ -221,7 +225,102 @@ function ArchiveDangerZone({
   );
 }
 
-export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSaveState, onArchive, archivePending }: ProjectPropertiesProps) {
+function CancelOpenIssuesDangerZone({
+  project,
+  onCancelOpenIssues,
+  pending,
+  job,
+}: {
+  project: Project;
+  onCancelOpenIssues: () => void;
+  pending?: boolean;
+  job?: ProjectCancelOpenIssuesJob | null;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const running = job?.status === "running";
+  const total = Math.max(job?.totalEstimate ?? 0, job?.cancelledCount ?? 0);
+  const percent = total > 0 ? Math.min(100, Math.round(((job?.cancelledCount ?? 0) / total) * 100)) : 0;
+
+  return (
+    <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 px-4 py-4">
+      <p className="text-sm text-muted-foreground">
+        Move every issue in this project that is not done or cancelled to cancelled. Active runs on those issues are stopped.
+        Large projects are processed in the background in batches.
+      </p>
+      {running && job ? (
+        <div className="space-y-2" data-testid="cancel-open-issues-progress">
+          <div className="flex items-center gap-2 text-sm text-destructive font-medium">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Cancelling {job.cancelledCount.toLocaleString()} of ~{total.toLocaleString()} issues ({percent}%)
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-destructive/15">
+            <div className="h-full bg-destructive transition-[width]" style={{ width: `${percent}%` }} />
+          </div>
+          <p className="text-xs text-muted-foreground">You can leave this page; the job keeps running on the server.</p>
+        </div>
+      ) : pending ? (
+        <Button size="sm" variant="destructive" disabled>
+          <Loader2 className="h-3 w-3 animate-spin mr-1" />
+          Starting...
+        </Button>
+      ) : confirming ? (
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-destructive font-medium">
+            Cancel all open issues in &ldquo;{project.name}&rdquo;? This cannot be undone.
+          </span>
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={() => {
+              setConfirming(false);
+              onCancelOpenIssues();
+            }}
+          >
+            Confirm
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setConfirming(false)}
+          >
+            Cancel
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={() => setConfirming(true)}
+          >
+            <Ban className="h-3 w-3 mr-1" />Cancel open issues
+          </Button>
+          {job?.status === "failed" ? (
+            <p className="text-xs text-destructive">
+              Last run failed after {job.cancelledCount.toLocaleString()} issues: {job.error}. Starting again resumes where it stopped.
+            </p>
+          ) : job?.status === "completed" && (job.remainingCount ?? 0) > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              Last run left {job.remainingCount!.toLocaleString()} issues that were being edited concurrently. Run it again to finish.
+            </p>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ProjectProperties({
+  project,
+  onUpdate,
+  onFieldUpdate,
+  getFieldSaveState,
+  onArchive,
+  archivePending,
+  onCancelOpenIssues,
+  cancelOpenIssuesPending,
+  cancelOpenIssuesJob,
+}: ProjectPropertiesProps) {
   const { selectedCompanyId } = useCompany();
   const queryClient = useQueryClient();
   const [goalOpen, setGoalOpen] = useState(false);
@@ -547,6 +646,21 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
             />
           ) : (
             <StatusBadge status={project.status} />
+          )}
+        </PropertyRow>
+        <PropertyRow label={<FieldLabel label="Default" state={fieldState("is_default")} />}>
+          {onUpdate || onFieldUpdate ? (
+            <div className="flex items-center gap-2">
+              <ToggleSwitch
+                checked={project.isDefault}
+                onCheckedChange={() => commitField("is_default", { isDefault: !project.isDefault })}
+              />
+              <span className="text-xs text-muted-foreground">
+                New issues created without a project are placed here.
+              </span>
+            </div>
+          ) : (
+            <span className="text-sm">{project.isDefault ? "Yes" : "No"}</span>
           )}
         </PropertyRow>
         {project.leadAgentId && (
@@ -1163,18 +1277,28 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
 
       </div>
 
-      {onArchive && (
+      {(onArchive || onCancelOpenIssues) && (
         <>
           <Separator className="my-4" />
           <div className="space-y-4 py-4">
             <div className="text-xs font-medium text-destructive uppercase tracking-wide">
               Danger Zone
             </div>
-            <ArchiveDangerZone
-              project={project}
-              onArchive={onArchive}
-              archivePending={archivePending}
-            />
+            {onCancelOpenIssues && (
+              <CancelOpenIssuesDangerZone
+                project={project}
+                onCancelOpenIssues={onCancelOpenIssues}
+                pending={cancelOpenIssuesPending}
+                job={cancelOpenIssuesJob}
+              />
+            )}
+            {onArchive && (
+              <ArchiveDangerZone
+                project={project}
+                onArchive={onArchive}
+                archivePending={archivePending}
+              />
+            )}
           </div>
         </>
       )}

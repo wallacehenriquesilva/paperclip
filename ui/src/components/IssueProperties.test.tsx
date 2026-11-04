@@ -282,6 +282,7 @@ function createProject(overrides: Partial<Project> = {}): Project {
     pauseReason: null,
     pausedAt: null,
     executionWorkspacePolicy: null,
+    isDefault: false,
     codebase: {
       workspaceId: "workspace-main",
       repoUrl: null,

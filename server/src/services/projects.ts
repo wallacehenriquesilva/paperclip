@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   projects,
@@ -425,6 +425,44 @@ export function resolveProjectNameForUniqueShortname(
   return `${requestedName} ${Date.now()}`;
 }
 
+type ProjectReader = Pick<Db, "select">;
+
+/**
+ * Company-wide default project: issues created without an explicit project
+ * fall back to it. At most one non-archived project per company holds the flag
+ * (enforced by the projects_company_default_idx partial unique index).
+ */
+export async function getDefaultCompanyProject(db: ProjectReader, companyId: string) {
+  return db
+    .select()
+    .from(projects)
+    .where(
+      and(
+        eq(projects.companyId, companyId),
+        eq(projects.isDefault, true),
+      ),
+    )
+    .limit(1)
+    .then((rows) => {
+      const row = rows[0] ?? null;
+      if (!row || row.archivedAt) return null;
+      return row;
+    });
+}
+
+async function clearCompanyDefaultProject(db: Db, companyId: string, excludeProjectId?: string) {
+  await db
+    .update(projects)
+    .set({ isDefault: false, updatedAt: new Date() })
+    .where(
+      and(
+        eq(projects.companyId, companyId),
+        eq(projects.isDefault, true),
+        excludeProjectId ? ne(projects.id, excludeProjectId) : undefined,
+      ),
+    );
+}
+
 async function ensureSinglePrimaryWorkspace(
   dbOrTx: any,
   input: {
@@ -479,6 +517,10 @@ export function projectService(db: Db) {
 
     // Also write goalId to the legacy column (first goal or null)
     const legacyGoalId = ids && ids.length > 0 ? ids[0] : projectData.goalId ?? null;
+
+    if (projectData.isDefault === true) {
+      await clearCompanyDefaultProject(db, companyId);
+    }
 
     const row = await db
       .insert(projects)
@@ -726,6 +768,14 @@ export function projectService(db: Db) {
       };
       if (ids !== undefined) {
         updates.goalId = ids.length > 0 ? ids[0] : null;
+      }
+
+      // Archiving a project also drops its default flag so another project can take it.
+      if (updates.archivedAt) {
+        updates.isDefault = false;
+      }
+      if (updates.isDefault === true) {
+        await clearCompanyDefaultProject(db, existingProject.companyId, id);
       }
 
       const row = await db

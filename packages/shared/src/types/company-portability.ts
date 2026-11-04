@@ -60,6 +60,7 @@ export interface CompanyPortabilityProjectManifestEntry {
   targetDate: string | null;
   color: string | null;
   status: string | null;
+  isDefault: boolean | null;
   env: AgentEnvConfig | null;
   executionWorkspacePolicy: Record<string, unknown> | null;
   workspaces: CompanyPortabilityProjectWorkspaceManifestEntry[];

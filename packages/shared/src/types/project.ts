@@ -82,6 +82,7 @@ export interface Project {
   pauseReason: PauseReason | null;
   pausedAt: Date | null;
   executionWorkspacePolicy: ProjectExecutionWorkspacePolicy | null;
+  isDefault: boolean;
   codebase: ProjectCodebase;
   workspaces: ProjectWorkspace[];
   primaryWorkspace: ProjectWorkspace | null;
@@ -89,4 +90,29 @@ export interface Project {
   archivedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export type ProjectCancelOpenIssuesJobStatus = "running" | "completed" | "failed";
+
+/**
+ * Progress of a background "cancel every open issue of the project" job. The job runs in
+ * bounded batches so it is safe on projects with hundreds of thousands of issues; it is
+ * idempotent, so a job interrupted by a restart is resumed by starting it again.
+ */
+export interface ProjectCancelOpenIssuesJob {
+  id: string;
+  projectId: string;
+  companyId: string;
+  status: ProjectCancelOpenIssuesJobStatus;
+  /** Open issues counted when the job started (issues created mid-job are also swept). */
+  totalEstimate: number;
+  cancelledCount: number;
+  batchCount: number;
+  interruptedRunCount: number;
+  cancelledWakeupCount: number;
+  /** Open issues left after the final pass (rows locked by concurrent writers are retried, then reported here). */
+  remainingCount: number | null;
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
 }

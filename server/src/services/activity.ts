@@ -28,6 +28,10 @@ export interface ActivityFilters {
 
 const DEFAULT_ACTIVITY_LIMIT = 100;
 const MAX_ACTIVITY_LIMIT = 500;
+// Issues driven by minute-cadence routines accumulate tens of thousands of runs;
+// an unbounded fetch overflows the stack when the ids feed the follow-up inArray()
+// queries, and the UI ledger only renders the most recent slice anyway.
+const MAX_RUNS_FOR_ISSUE = 200;
 
 export function normalizeActivityLimit(limit: number | undefined) {
   if (!Number.isFinite(limit)) return DEFAULT_ACTIVITY_LIMIT;
@@ -425,7 +429,8 @@ export function activityService(db: Db) {
             ),
           ),
         )
-        .orderBy(desc(heartbeatRuns.createdAt));
+        .orderBy(desc(heartbeatRuns.createdAt))
+        .limit(MAX_RUNS_FOR_ISSUE);
 
       if (runs.length === 0) return runs;
       const runIds = runs.map((run) => run.runId);
