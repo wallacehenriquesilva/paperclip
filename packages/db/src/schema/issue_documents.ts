@@ -21,6 +21,9 @@ export const issueDocuments = pgTable(
       table.key,
     ),
     documentUq: uniqueIndex("issue_documents_document_uq").on(table.documentId),
+    // Document lookups filter by issue_id alone; the company-leading indexes above
+    // cannot serve them, so every issue view scanned the whole table.
+    issueKeyIdx: index("issue_documents_issue_key_idx").on(table.issueId, table.key),
     companyIssueUpdatedIdx: index("issue_documents_company_issue_updated_idx").on(
       table.companyId,
       table.issueId,

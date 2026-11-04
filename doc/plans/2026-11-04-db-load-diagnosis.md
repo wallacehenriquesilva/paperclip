@@ -135,3 +135,24 @@ promotes deferred comment wakes…`, timeout de 90 s) acontece igual sem a mudan
   manual. Exige reboot da instância.
 - Dar ao role acesso de leitura ao Performance Insights (`pi:DescribeDimensionKeys`,
   `pi:GetResourceMetrics`).
+
+## Rodada 2 — CPU (~50%) após os itens 1–3
+
+Amostragem de 30 s em produção (92 amostras, média de 3,1 sessões ativas) + delta de leituras
+por tabela:
+
+| Query | Amostras em CPU | Leitura em 30 s |
+|---|---|---|
+| Documentos de uma issue (`documents.ts` → `getIssueDocumentPayload` / `listIssueDocuments`) | 23 de ~45 (~50%) | `issue_documents`: 984 seq scans, **150 M linhas** |
+| Listagem de issues: fase de ids (ordenação por "última atividade") | 15 + 17 esperando workers paralelos (~35%) | ~1,19 M buscas em `activity_log` e ~1,19 M em `issue_comments` |
+
+**Documentos de uma issue:** as queries filtram só por `issue_id`, mas todos os índices de
+`issue_documents` começam por `company_id`. Cada abertura de issue lia a tabela inteira
+(458k linhas, em cache, então custava CPU e não disco). Correção: índice
+`issue_documents_issue_key_idx` em `(issue_id, key)`. Foi criado em produção com
+`CONCURRENTLY` (`EXPLAIN ANALYZE` depois: 1,5 ms usando o índice) e versionado na migration
+`0102_issue_documents_issue_key_idx.sql` com `IF NOT EXISTS`. Não precisa de deploy: o índice já
+vale no banco, e a migration é no-op no próximo deploy.
+
+**Ordenação da listagem:** confirmada como o segundo maior consumo. A correção definitiva é a
+coluna `last_activity_at` desnormalizada (ver próximos passos).
