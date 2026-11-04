@@ -74,6 +74,7 @@ function createProject(): Project {
     pauseReason: null,
     pausedAt: null,
     archivedAt: null,
+    isDefault: false,
     executionWorkspacePolicy: {
       enabled: true,
       defaultMode: "shared_workspace",

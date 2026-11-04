@@ -68,6 +68,7 @@ import { redactSensitiveText } from "../redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { getDefaultCompanyGoal } from "./goals.js";
+import { getDefaultCompanyProject } from "./projects.js";
 import {
   isVerifiedIssueTreeControlInteractionWake,
   issueTreeControlService,
@@ -3521,21 +3522,34 @@ export function issueService(db: Db) {
         END
       `;
       const canonicalLastActivityAt = issueCanonicalLastActivityAtExpr(companyId);
-      const baseQuery = db
-        .select(issueListSelect)
-        .from(issues)
-        .where(and(...conditions))
-        .orderBy(
-          hasSearch ? asc(searchOrder) : asc(priorityOrder),
-          asc(priorityOrder),
-          desc(canonicalLastActivityAt),
-          desc(issues.updatedAt),
-          desc(issues.id),
-        );
-      const pageQuery = offset > 0
-        ? (limit === undefined ? baseQuery.offset(offset) : baseQuery.limit(limit).offset(offset))
-        : (limit === undefined ? baseQuery : baseQuery.limit(limit));
-      const rows = (await pageQuery).map((row) => ({
+      const listOrder = [
+        hasSearch ? asc(searchOrder) : asc(priorityOrder),
+        asc(priorityOrder),
+        desc(canonicalLastActivityAt),
+        desc(issues.updatedAt),
+        desc(issues.id),
+      ];
+      const loadPageRows = async () => {
+        if (limit === undefined) {
+          const baseQuery = db.select(issueListSelect).from(issues).where(and(...conditions)).orderBy(...listOrder);
+          return offset > 0 ? await baseQuery.offset(offset) : await baseQuery;
+        }
+        // Pick the page by id first, then load the wide rows for that page only.
+        // Sorting the full select list made Postgres detoast and carry every
+        // matching issue's description through the sort (100k+ rows on large
+        // companies), spilling to disk and dominating DB load.
+        const idQuery = db.select({ id: issues.id }).from(issues).where(and(...conditions)).orderBy(...listOrder).limit(limit);
+        const pageIds = (offset > 0 ? await idQuery.offset(offset) : await idQuery).map((row) => row.id);
+        if (pageIds.length === 0) return [];
+        const position = new Map(pageIds.map((id, index) => [id, index]));
+        const loaded = await db
+          .select(issueListSelect)
+          .from(issues)
+          .where(and(eq(issues.companyId, companyId), inArray(issues.id, pageIds)));
+        return loaded.sort((left, right) => position.get(left.id)! - position.get(right.id)!);
+      };
+      const pageRows = await loadPageRows();
+      const rows = pageRows.map((row) => ({
         ...row,
         description: decodeDatabaseTextPreview(row.description, ISSUE_LIST_DESCRIPTION_MAX_CHARS),
       }));
@@ -4053,6 +4067,18 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
+        // Top-level issues created without any project or workspace targeting
+        // fall back to the company's default project when one is configured.
+        if (
+          issueData.projectId == null &&
+          issueData.parentId == null &&
+          inheritExecutionWorkspaceFromIssueId == null &&
+          issueData.projectWorkspaceId == null &&
+          issueData.executionWorkspaceId == null
+        ) {
+          const defaultProject = await getDefaultCompanyProject(tx, companyId);
+          if (defaultProject) issueData.projectId = defaultProject.id;
+        }
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;

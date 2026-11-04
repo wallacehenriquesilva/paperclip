@@ -784,7 +784,7 @@ Terminal states: `done`, `cancelled`
 | GET    | `/api/companies/:companyId/issues` | List issues, sorted by priority. Filters: `?status=`, `?assigneeAgentId=`, `?assigneeUserId=`, `?projectId=`, `?labelId=`, `?q=` (full-text search across title, identifier, description, comments) |
 | GET    | `/api/issues/:issueId`             | Issue details + ancestors                                                                |
 | GET    | `/api/issues/:issueId/heartbeat-context` | Compact context for heartbeat: issue state, ancestor summaries, comment cursor  |
-| POST   | `/api/companies/:companyId/issues` | Create issue (supports `blockedByIssueIds: string[]` for dependencies)                   |
+| POST   | `/api/companies/:companyId/issues` | Create issue (supports `blockedByIssueIds: string[]` for dependencies). Top-level issues created without a `projectId` land in the company's default project when one is configured (`isDefault` on the project) |
 | PATCH  | `/api/issues/:issueId`             | Update issue (optional `comment` field; `blockedByIssueIds` replaces blocker set)        |
 | POST   | `/api/issues/:issueId/checkout`    | Atomic checkout (claim + start). Idempotent if you already own it.                       |
 | POST   | `/api/issues/:issueId/release`     | Release task ownership                                                                   |
@@ -824,6 +824,8 @@ Terminal states: `done`, `cancelled`
 | GET    | `/api/projects/:projectId`           | Project details    |
 | POST   | `/api/companies/:companyId/projects` | Create project (optional inline `workspace`) |
 | PATCH  | `/api/projects/:projectId`           | Update project     |
+| POST   | `/api/projects/:projectId/issues/cancel-open` | Board only: start a background job (202) that cancels, in batches, every issue in the project that is not done/cancelled. Idempotent; returns the running job if one exists |
+| GET    | `/api/projects/:projectId/issues/cancel-open` | Board only: progress of the latest cancel-open job for the project (`null` if none) |
 | GET    | `/api/projects/:projectId/workspaces` | List project workspaces |
 | POST   | `/api/projects/:projectId/workspaces` | Create project workspace |
 | PATCH  | `/api/projects/:projectId/workspaces/:workspaceId` | Update project workspace |

@@ -33,6 +33,10 @@ export function isCodexLocalFastModeSupported(model: string | null | undefined):
 }
 
 export const models = [
+  { id: "gpt-6.1-sol", label: "gpt-6.1-sol" },
+  { id: "gpt-6-astra", label: "gpt-6-astra" },
+  { id: "gpt-6-sol", label: "gpt-6-sol" },
+  { id: "gpt-6-luna", label: "gpt-6-luna" },
   { id: DEFAULT_CODEX_LOCAL_MODEL, label: DEFAULT_CODEX_LOCAL_MODEL },
   { id: "gpt-5.6-sol", label: "gpt-5.6-sol" },
   { id: "gpt-5.6-terra", label: "gpt-5.6-terra" },

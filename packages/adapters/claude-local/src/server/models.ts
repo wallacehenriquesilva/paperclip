@@ -3,6 +3,9 @@ import { models as DIRECT_MODELS } from "../index.js";
 
 /** AWS Bedrock model IDs — region-qualified identifiers required by the Bedrock API. */
 const BEDROCK_MODELS: AdapterModel[] = [
+  { id: "us.anthropic.claude-opus-5-5-v1", label: "Bedrock Opus 5.5" },
+  { id: "us.anthropic.claude-sonnet-5-5-v1", label: "Bedrock Sonnet 5.5" },
+  { id: "us.anthropic.claude-fable-5-1-v1", label: "Bedrock Fable 5.1" },
   { id: "us.anthropic.claude-opus-5-v1", label: "Bedrock Opus 5" },
   { id: "us.anthropic.claude-sonnet-5-v1", label: "Bedrock Sonnet 5" },
   { id: "us.anthropic.claude-opus-4-8-v1", label: "Bedrock Opus 4.8" },

@@ -594,6 +594,7 @@ function createProject(overrides: Partial<Project> = {}): Project {
     env: null,
     pauseReason: null,
     pausedAt: null,
+    isDefault: false,
     executionWorkspacePolicy: {
       enabled: true,
       defaultMode: "isolated_workspace",
@@ -681,6 +682,7 @@ export const storybookProjects: Project[] = [
       effectiveLocalFolder: "Not configured",
       origin: "local_folder",
     },
+    isDefault: false,
     executionWorkspacePolicy: {
       enabled: false,
       defaultMode: "shared_workspace",

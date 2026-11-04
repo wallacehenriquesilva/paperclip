@@ -1,0 +1,12 @@
+-- Index for recovery handoffs that dedupe agent wakeups by idempotency key
+-- (successful-run-handoff, run-liveness-continuations). Without it every lookup
+-- scanned the whole agent_wakeup_requests table. Partial: most rows have no key.
+--
+-- Plain CREATE INDEX because Drizzle runs each migration inside a transaction,
+-- where CREATE INDEX CONCURRENTLY is illegal. On a large/hot production table,
+-- build it out-of-band FIRST with:
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "agent_wakeup_requests_company_idempotency_key_idx"
+--     ON "agent_wakeup_requests" USING btree ("company_id","idempotency_key")
+--     WHERE "agent_wakeup_requests"."idempotency_key" is not null;
+-- then this migration becomes a no-op thanks to IF NOT EXISTS.
+CREATE INDEX IF NOT EXISTS "agent_wakeup_requests_company_idempotency_key_idx" ON "agent_wakeup_requests" USING btree ("company_id","idempotency_key") WHERE "agent_wakeup_requests"."idempotency_key" is not null;

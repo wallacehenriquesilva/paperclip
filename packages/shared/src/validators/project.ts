@@ -107,6 +107,7 @@ const projectFields = {
   color: z.string().optional().nullable(),
   env: envConfigSchema.optional().nullable(),
   executionWorkspacePolicy: projectExecutionWorkspacePolicySchema.optional().nullable(),
+  isDefault: z.boolean().optional(),
   archivedAt: z.string().datetime().optional().nullable(),
 };
 

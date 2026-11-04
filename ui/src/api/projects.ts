@@ -1,5 +1,6 @@
 import type {
   Project,
+  ProjectCancelOpenIssuesJob,
   ProjectWorkspace,
   WorkspaceOperation,
   WorkspaceRuntimeControlTarget,
@@ -58,4 +59,8 @@ export const projectsApi = {
   removeWorkspace: (projectId: string, workspaceId: string, companyId?: string) =>
     api.delete<ProjectWorkspace>(projectPath(projectId, companyId, `/workspaces/${encodeURIComponent(workspaceId)}`)),
   remove: (id: string, companyId?: string) => api.delete<Project>(projectPath(id, companyId)),
+  startCancelOpenIssues: (id: string, companyId?: string) =>
+    api.post<ProjectCancelOpenIssuesJob>(projectPath(id, companyId, "/issues/cancel-open"), {}),
+  getCancelOpenIssuesJob: (id: string, companyId?: string) =>
+    api.get<ProjectCancelOpenIssuesJob | null>(projectPath(id, companyId, "/issues/cancel-open")),
 };

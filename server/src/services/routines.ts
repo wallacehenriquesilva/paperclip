@@ -771,8 +771,30 @@ export function routineService(
 
   async function listLatestRunByRoutineIds(companyId: string, routineIds: string[]) {
     if (routineIds.length === 0) return new Map<string, RoutineRunSummary>();
+    // Pick each routine's latest run id by walking the (company_id,
+    // routine_id, created_at) index once per routine (LIMIT 1). The previous
+    // DISTINCT ON read — and detoasted trigger_payload for — every historical
+    // run of every routine just to keep one row each, which grew to tens of
+    // seconds per board poll as run history accumulated.
+    const routineIdArray = sql`ARRAY[${sql.join(routineIds.map((id) => sql`${id}`), sql`, `)}]::uuid[]`;
+    const pickedRows = await db.execute(sql`
+      select (
+        select rr.id
+        from ${routineRuns} rr
+        where rr.company_id = ${companyId}
+          and rr.routine_id = rid
+        order by rr.created_at desc nulls last, rr.id desc nulls last
+        limit 1
+      ) as id
+      from unnest(${routineIdArray}) as rid
+    `);
+    const latestRunIds = (Array.isArray(pickedRows) ? pickedRows : [])
+      .map((row: { id?: string | null }) => row?.id)
+      .filter((id): id is string => Boolean(id));
+    if (latestRunIds.length === 0) return new Map<string, RoutineRunSummary>();
+
     const rows = await db
-      .selectDistinctOn([routineRuns.routineId], {
+      .select({
         id: routineRuns.id,
         companyId: routineRuns.companyId,
         routineId: routineRuns.routineId,
@@ -800,16 +822,7 @@ export function routineService(
       .from(routineRuns)
       .leftJoin(routineTriggers, eq(routineRuns.triggerId, routineTriggers.id))
       .leftJoin(issues, eq(routineRuns.linkedIssueId, issues.id))
-      .where(and(eq(routineRuns.companyId, companyId), inArray(routineRuns.routineId, routineIds)))
-      // `desc nulls last` (not plain `desc`, which implies nulls first) so the
-      // sort matches routine_runs_company_routine_created_desc_idx exactly and
-      // Postgres can walk the index instead of sorting every run of the
-      // company. Both columns are NOT NULL, so the semantics are unchanged.
-      .orderBy(
-        routineRuns.routineId,
-        sql`${routineRuns.createdAt} desc nulls last`,
-        sql`${routineRuns.id} desc nulls last`,
-      );
+      .where(inArray(routineRuns.id, latestRunIds));
 
     const map = new Map<string, RoutineRunSummary>();
     for (const row of rows) {

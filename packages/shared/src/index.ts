@@ -355,6 +355,8 @@ export type {
   AdapterEnvironmentTestResult,
   AssetImage,
   Project,
+  ProjectCancelOpenIssuesJob,
+  ProjectCancelOpenIssuesJobStatus,
   ProjectCodebase,
   ProjectCodebaseOrigin,
   ProjectGoalRef,

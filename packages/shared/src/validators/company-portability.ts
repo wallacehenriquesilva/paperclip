@@ -103,6 +103,7 @@ export const portabilityProjectManifestEntrySchema = z.object({
   targetDate: z.string().nullable(),
   color: z.string().nullable(),
   status: z.string().nullable(),
+  isDefault: z.boolean().nullable().default(null),
   executionWorkspacePolicy: z.record(z.unknown()).nullable(),
   workspaces: z.array(z.object({
     key: z.string().min(1),

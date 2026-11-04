@@ -2915,6 +2915,7 @@ function buildManifestFromPackageFiles(
       targetDate: asString(extension.targetDate),
       color: asString(extension.color),
       status: asString(extension.status),
+      isDefault: asBoolean(extension.isDefault),
       env: normalizePortableProjectEnv(extension.env),
       executionWorkspacePolicy: isPlainRecord(extension.executionWorkspacePolicy)
         ? extension.executionWorkspacePolicy
@@ -3730,6 +3731,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         targetDate: project.targetDate ?? null,
         color: project.color ?? null,
         status: project.status,
+        isDefault: project.isDefault === true ? true : undefined,
         executionWorkspacePolicy: exportPortableProjectExecutionWorkspacePolicy(
           slug,
           project.executionWorkspacePolicy,
@@ -4860,6 +4862,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           status: manifestProject.status && PROJECT_STATUSES.includes(manifestProject.status as any)
             ? manifestProject.status as typeof PROJECT_STATUSES[number]
             : "backlog",
+          isDefault: manifestProject.isDefault === true ? true : undefined,
           env: existingProject && planProject.action === "update"
             ? mergePreservedImportProjectEnv(
               normalizePortableProjectEnv(existingProject.env),
