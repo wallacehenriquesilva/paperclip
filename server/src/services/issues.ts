@@ -3521,21 +3521,34 @@ export function issueService(db: Db) {
         END
       `;
       const canonicalLastActivityAt = issueCanonicalLastActivityAtExpr(companyId);
-      const baseQuery = db
-        .select(issueListSelect)
-        .from(issues)
-        .where(and(...conditions))
-        .orderBy(
-          hasSearch ? asc(searchOrder) : asc(priorityOrder),
-          asc(priorityOrder),
-          desc(canonicalLastActivityAt),
-          desc(issues.updatedAt),
-          desc(issues.id),
-        );
-      const pageQuery = offset > 0
-        ? (limit === undefined ? baseQuery.offset(offset) : baseQuery.limit(limit).offset(offset))
-        : (limit === undefined ? baseQuery : baseQuery.limit(limit));
-      const rows = (await pageQuery).map((row) => ({
+      const listOrder = [
+        hasSearch ? asc(searchOrder) : asc(priorityOrder),
+        asc(priorityOrder),
+        desc(canonicalLastActivityAt),
+        desc(issues.updatedAt),
+        desc(issues.id),
+      ];
+      const loadPageRows = async () => {
+        if (limit === undefined) {
+          const baseQuery = db.select(issueListSelect).from(issues).where(and(...conditions)).orderBy(...listOrder);
+          return offset > 0 ? await baseQuery.offset(offset) : await baseQuery;
+        }
+        // Pick the page by id first, then load the wide rows for that page only.
+        // Sorting the full select list made Postgres detoast and carry every
+        // matching issue's description through the sort (100k+ rows on large
+        // companies), spilling to disk and dominating DB load.
+        const idQuery = db.select({ id: issues.id }).from(issues).where(and(...conditions)).orderBy(...listOrder).limit(limit);
+        const pageIds = (offset > 0 ? await idQuery.offset(offset) : await idQuery).map((row) => row.id);
+        if (pageIds.length === 0) return [];
+        const position = new Map(pageIds.map((id, index) => [id, index]));
+        const loaded = await db
+          .select(issueListSelect)
+          .from(issues)
+          .where(and(eq(issues.companyId, companyId), inArray(issues.id, pageIds)));
+        return loaded.sort((left, right) => position.get(left.id)! - position.get(right.id)!);
+      };
+      const pageRows = await loadPageRows();
+      const rows = pageRows.map((row) => ({
         ...row,
         description: decodeDatabaseTextPreview(row.description, ISSUE_LIST_DESCRIPTION_MAX_CHARS),
       }));

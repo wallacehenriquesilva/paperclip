@@ -1,4 +1,5 @@
 import { pgTable, uuid, text, timestamp, jsonb, integer, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 
@@ -36,5 +37,10 @@ export const agentWakeupRequests = pgTable(
       table.requestedAt,
     ),
     agentRequestedIdx: index("agent_wakeup_requests_agent_requested_idx").on(table.agentId, table.requestedAt),
+    // Recovery handoffs dedupe wakeups by idempotency key; without this every
+    // lookup scanned the whole table. Partial: most wakeups carry no key.
+    companyIdempotencyKeyIdx: index("agent_wakeup_requests_company_idempotency_key_idx")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
   }),
 );
