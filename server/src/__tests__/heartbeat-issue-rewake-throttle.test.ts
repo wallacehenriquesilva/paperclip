@@ -9,12 +9,15 @@ import {
   companies,
   companySkills,
   createDb,
+  documentRevisions,
+  documents,
   environmentLeases,
   environments,
   executionWorkspaces,
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueDocuments,
   issues,
 } from "@paperclipai/db";
 import {
@@ -76,6 +79,10 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     }
     await db.delete(environmentLeases);
     await db.delete(issueComments);
+    // Fork: runs can persist issue documents, which reference the company.
+    await db.delete(issueDocuments);
+    await db.delete(documentRevisions);
+    await db.delete(documents);
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(activityLog);
