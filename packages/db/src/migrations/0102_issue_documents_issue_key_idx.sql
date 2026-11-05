@@ -1,0 +1,11 @@
+-- Index for issue document lookups (documents service), which filter by issue_id
+-- (and key) without company_id. The existing company-leading indexes cannot serve
+-- them, so every issue view sequentially scanned issue_documents.
+--
+-- Plain CREATE INDEX because Drizzle runs each migration inside a transaction,
+-- where CREATE INDEX CONCURRENTLY is illegal. On a large/hot production table,
+-- build it out-of-band FIRST with:
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "issue_documents_issue_key_idx"
+--     ON "issue_documents" USING btree ("issue_id","key");
+-- then this migration becomes a no-op thanks to IF NOT EXISTS.
+CREATE INDEX IF NOT EXISTS "issue_documents_issue_key_idx" ON "issue_documents" USING btree ("issue_id","key");

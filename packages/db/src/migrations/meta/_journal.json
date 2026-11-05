@@ -715,6 +715,13 @@
       "when": 1793826518277,
       "tag": "0101_wakeup_idempotency_key_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1793835580106,
+      "tag": "0102_issue_documents_issue_key_idx",
+      "breakpoints": true
     }
   ]
 }

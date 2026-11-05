@@ -64,6 +64,7 @@ export interface Config {
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
+  databaseStatementTimeoutMs: number;
   embeddedPostgresDataDir: string;
   embeddedPostgresPort: number;
   databaseBackupEnabled: boolean;
@@ -109,6 +110,15 @@ function detectTailnetBindHost(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+const DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000;
+
+function parseStatementTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_DB_STATEMENT_TIMEOUT_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DB_STATEMENT_TIMEOUT_MS;
+  return Math.floor(value);
 }
 
 export function loadConfig(): Config {
@@ -318,6 +328,9 @@ export function loadConfig(): Config {
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
+    // Caps every app query (0 disables). Guards against runaway queries that keep
+    // running after their client disconnects, e.g. across a deploy restart.
+    databaseStatementTimeoutMs: parseStatementTimeoutMs(process.env.PAPERCLIP_DB_STATEMENT_TIMEOUT_MS),
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
     ),

@@ -276,8 +276,10 @@ export async function startServer(): Promise<StartedServer> {
     const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
     migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
   
-    db = createDb(config.databaseUrl);
-    pluginMigrationDb = config.databaseMigrationUrl ? createDb(config.databaseMigrationUrl) : db;
+    db = createDb(config.databaseUrl, { statementTimeoutMs: config.databaseStatementTimeoutMs });
+    // Plugin migrations may legitimately run long (index builds), so they never
+    // share the capped pool.
+    pluginMigrationDb = createDb(config.databaseMigrationUrl ?? config.databaseUrl);
     logger.info("Using external PostgreSQL via DATABASE_URL/config");
     activeDatabaseConnectionString = config.databaseUrl;
     startupDbInfo = { mode: "external-postgres", connectionString: config.databaseUrl };
