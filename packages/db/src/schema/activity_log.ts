@@ -30,5 +30,15 @@ export const activityLog = pgTable(
       table.entityId,
       table.agentId,
     ),
+    // Port of upstream #18043. The issue list ranks by the newest qualifying
+    // activity per issue (MAX(created_at) with action exclusions); with
+    // created_at in the key Postgres reads each issue's history backward and
+    // stops at the first qualifying event instead of reading all of it.
+    companyEntityCreatedIdx: index("activity_log_company_entity_created_idx").on(
+      table.companyId,
+      table.entityType,
+      table.entityId,
+      table.createdAt,
+    ),
   }),
 );
