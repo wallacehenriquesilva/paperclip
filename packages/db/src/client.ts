@@ -45,8 +45,21 @@ export type MigrationState =
       reason: "no-migration-journal-empty-db" | "no-migration-journal-non-empty-db" | "pending-migrations";
     };
 
-export function createDb(url: string) {
-  const sql = postgres(url);
+export interface CreateDbOptions {
+  /**
+   * Server-side cap for every statement on this pool, in milliseconds. Postgres
+   * keeps executing a query after its client is gone (e.g. a restarted container),
+   * so without a cap one runaway query can hold the CPU for many minutes.
+   * Omit or pass 0 to disable. Transactions may still raise it with SET LOCAL.
+   */
+  statementTimeoutMs?: number;
+}
+
+export function createDb(url: string, options: CreateDbOptions = {}) {
+  const statementTimeoutMs = options.statementTimeoutMs ?? 0;
+  const sql = statementTimeoutMs > 0
+    ? postgres(url, { connection: { statement_timeout: Math.floor(statementTimeoutMs) } })
+    : postgres(url);
   return drizzlePg(sql, { schema });
 }
 
