@@ -47,11 +47,26 @@ function pushCandidate(
 }
 
 export function choosePrimaryRuntimeApiUrl(input: {
+  /**
+   * Operator override (PAPERCLIP_RUNTIME_API_URL). Lets co-located agents call
+   * the API over loopback while the public URL keeps serving browsers, auth and
+   * generated webhook links.
+   */
+  explicitRuntimeApiUrl?: string | null;
   authPublicBaseUrl?: string | null;
   allowedHostnames: string[];
   bindHost: string;
   port: number;
 }): string {
+  const explicitRuntimeApiUrl = input.explicitRuntimeApiUrl?.trim();
+  if (explicitRuntimeApiUrl) {
+    try {
+      return new URL(explicitRuntimeApiUrl).origin;
+    } catch {
+      // Ignore a malformed override and derive the URL as usual.
+    }
+  }
+
   const explicitPublicBaseUrl = input.authPublicBaseUrl?.trim();
   if (explicitPublicBaseUrl) {
     try {
