@@ -722,6 +722,13 @@
       "when": 1793835580106,
       "tag": "0102_issue_documents_issue_key_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1793877963565,
+      "tag": "0103_activity_log_company_entity_created_idx",
+      "breakpoints": true
     }
   ]
 }

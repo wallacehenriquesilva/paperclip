@@ -17,6 +17,30 @@ describe("runtime API discovery", () => {
     ).toBe("https://paperclip.example.com");
   });
 
+  it("lets an explicit runtime API URL override the public base URL", () => {
+    expect(
+      choosePrimaryRuntimeApiUrl({
+        explicitRuntimeApiUrl: " http://127.0.0.1:3100/ ",
+        authPublicBaseUrl: "https://paperclip.example.com",
+        allowedHostnames: [],
+        bindHost: "0.0.0.0",
+        port: 3100,
+      }),
+    ).toBe("http://127.0.0.1:3100");
+  });
+
+  it("ignores a malformed runtime API URL override", () => {
+    expect(
+      choosePrimaryRuntimeApiUrl({
+        explicitRuntimeApiUrl: "not a url",
+        authPublicBaseUrl: "https://paperclip.example.com",
+        allowedHostnames: [],
+        bindHost: "0.0.0.0",
+        port: 3100,
+      }),
+    ).toBe("https://paperclip.example.com");
+  });
+
   it("builds ordered callback candidates from explicit, allowed, bind, and interface hosts", () => {
     expect(
       buildRuntimeApiCandidateUrls({

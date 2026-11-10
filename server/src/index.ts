@@ -636,6 +636,7 @@ export async function startServer(): Promise<StartedServer> {
   
   const runtimeListenHost = config.host;
   const runtimeApiUrl = choosePrimaryRuntimeApiUrl({
+    explicitRuntimeApiUrl: process.env.PAPERCLIP_RUNTIME_API_URL ?? null,
     authPublicBaseUrl: config.authPublicBaseUrl ?? null,
     allowedHostnames: config.allowedHostnames,
     bindHost: runtimeListenHost,

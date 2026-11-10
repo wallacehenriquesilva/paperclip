@@ -41,4 +41,14 @@ describeEmbeddedPostgres("createDb statement timeout", () => {
     const db = createDb(tempDb!.connectionString);
     expect(await currentStatementTimeout(db)).toBe("0");
   });
+
+  it("names the pool so it is identifiable in pg_stat_activity", async () => {
+    const named = createDb(tempDb!.connectionString);
+    const rows = await named.execute(sql`select current_setting('application_name') as value`);
+    expect(String((rows as unknown as Array<{ value: string }>)[0]?.value)).toBe("paperclip");
+
+    const custom = createDb(tempDb!.connectionString, { applicationName: "paperclip-test" });
+    const customRows = await custom.execute(sql`select current_setting('application_name') as value`);
+    expect(String((customRows as unknown as Array<{ value: string }>)[0]?.value)).toBe("paperclip-test");
+  });
 });

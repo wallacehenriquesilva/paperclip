@@ -53,13 +53,45 @@ export interface CreateDbOptions {
    * Omit or pass 0 to disable. Transactions may still raise it with SET LOCAL.
    */
   statementTimeoutMs?: number;
+  /**
+   * Seconds before an idle pooled connection is closed. The driver default
+   * keeps idle connections open forever. 0 restores that behavior.
+   * Defaults to DATABASE_IDLE_TIMEOUT_SECONDS, then 60.
+   */
+  idleTimeoutSeconds?: number;
+  /**
+   * `application_name` reported to Postgres, so the pool is identifiable in
+   * pg_stat_activity. Defaults to DATABASE_APPLICATION_NAME, then "paperclip".
+   */
+  applicationName?: string;
+}
+
+// Port of the pool defaults from upstream paperclipai/paperclip#12956.
+export const DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS = 60;
+export const DEFAULT_DATABASE_APPLICATION_NAME = "paperclip";
+
+function envNonNegativeInteger(name: string): number | undefined {
+  const value = process.env[name]?.trim();
+  if (!value) return undefined;
+  if (!/^(?:0|[1-9]\d*)$/.test(value)) {
+    throw new Error(`${name} must be a non-negative integer, got: ${process.env[name]}`);
+  }
+  return Number.parseInt(value, 10);
 }
 
 export function createDb(url: string, options: CreateDbOptions = {}) {
   const statementTimeoutMs = options.statementTimeoutMs ?? 0;
-  const sql = statementTimeoutMs > 0
-    ? postgres(url, { connection: { statement_timeout: Math.floor(statementTimeoutMs) } })
-    : postgres(url);
+  const idleTimeoutSeconds = options.idleTimeoutSeconds
+    ?? envNonNegativeInteger("DATABASE_IDLE_TIMEOUT_SECONDS")
+    ?? DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS;
+  const applicationName = options.applicationName
+    ?? (process.env.DATABASE_APPLICATION_NAME?.trim() || DEFAULT_DATABASE_APPLICATION_NAME);
+  const connection: Record<string, string | number> = { application_name: applicationName };
+  if (statementTimeoutMs > 0) connection.statement_timeout = Math.floor(statementTimeoutMs);
+  const sql = postgres(url, {
+    connection,
+    ...(idleTimeoutSeconds > 0 ? { idle_timeout: idleTimeoutSeconds } : {}),
+  });
   return drizzlePg(sql, { schema });
 }
 

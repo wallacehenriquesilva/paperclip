@@ -18,7 +18,8 @@ All environment variables that Paperclip uses for server configuration.
 | `PAPERCLIP_INSTANCE_ID` | `default` | Instance identifier (for multiple local instances) |
 | `PAPERCLIP_DEPLOYMENT_MODE` | `local_trusted` | Runtime mode override |
 | `PAPERCLIP_DEPLOYMENT_EXPOSURE` | `private` | Exposure policy when deployment mode is `authenticated` |
-| `PAPERCLIP_API_URL` | (auto-derived) | Paperclip API base URL. When set externally (e.g., via Kubernetes ConfigMap, load balancer, or reverse proxy), the server preserves the value instead of deriving it from the listen host and port. Useful for deployments where the public-facing URL differs from the local bind address. |
+| `PAPERCLIP_API_URL` | (auto-derived) | Paperclip API base URL. When set externally (e.g., via Kubernetes ConfigMap, load balancer, or reverse proxy), the server preserves the value instead of deriving it from the listen host and port. Useful for deployments where the public-facing URL differs from the local bind address. Also used for generated webhook URLs, so keep it public-facing. |
+| `PAPERCLIP_RUNTIME_API_URL` | (auto-derived) | URL that locally run agents receive as their `PAPERCLIP_API_URL`. Takes precedence over `PAPERCLIP_API_URL` for agents and defaults to the public base URL. Set it to a loopback address (e.g., `http://127.0.0.1:3100`) so co-located agents skip the load balancer. |
 
 ## Secrets
 

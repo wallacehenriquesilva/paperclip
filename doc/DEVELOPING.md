@@ -478,6 +478,11 @@ Query timeout (external PostgreSQL via `DATABASE_URL`):
   `0` disables). Postgres keeps running a query after its client disconnects, so
   without a cap a runaway query can hold the database CPU across a restart. Core and
   plugin migrations and backups use their own connections and are not capped.
+- `DATABASE_IDLE_TIMEOUT_SECONDS=<s>` closes idle pooled connections after this many
+  seconds (default `60`, `0` keeps them open forever like the driver default).
+- `DATABASE_APPLICATION_NAME=<name>` is the `application_name` the pool reports to
+  Postgres (default `paperclip`), so its connections are identifiable in
+  `pg_stat_activity`.
 
 DB backups are not full instance filesystem backups. For full local disaster
 recovery, also back up local storage files and the local encrypted secrets key if

@@ -1,0 +1,12 @@
+-- Port of upstream paperclipai/paperclip#18043. The issue list ranks issues by
+-- their newest qualifying activity (MAX(activity_log.created_at) with action
+-- exclusions). With created_at in the key Postgres reads each issue's history
+-- backward and stops at the first qualifying event.
+--
+-- Plain CREATE INDEX because Drizzle runs each migration inside a transaction,
+-- where CREATE INDEX CONCURRENTLY is illegal. activity_log is the largest hot
+-- table in production, so build it out-of-band FIRST with:
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "activity_log_company_entity_created_idx"
+--     ON "activity_log" USING btree ("company_id","entity_type","entity_id","created_at");
+-- then this migration becomes a no-op thanks to IF NOT EXISTS.
+CREATE INDEX IF NOT EXISTS "activity_log_company_entity_created_idx" ON "activity_log" USING btree ("company_id","entity_type","entity_id","created_at");
