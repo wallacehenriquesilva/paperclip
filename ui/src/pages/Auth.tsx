@@ -10,6 +10,18 @@ import { Sparkles } from "lucide-react";
 
 type AuthMode = "sign_in" | "sign_up";
 
+export function describeSsoError(code: string | null): string | null {
+  if (!code) return null;
+  switch (code) {
+    case "access_denied":
+      return "Single sign-on was cancelled.";
+    case "signup_disabled":
+      return "Your account isn't registered on this instance yet. Ask an admin for an invite.";
+    default:
+      return "Single sign-on failed. Make sure you're using your organization account.";
+  }
+}
+
 export function AuthPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -18,7 +30,8 @@ export function AuthPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => describeSsoError(searchParams.get("error")));
+  const [showPasswordFallback, setShowPasswordFallback] = useState(false);
 
   const nextPath = useMemo(
     () => searchParams.get("next") || getRememberedInvitePath() || "/",
@@ -28,6 +41,31 @@ export function AuthPage() {
     queryKey: queryKeys.auth.session,
     queryFn: () => authApi.getSession(),
     retry: false,
+  });
+
+  const { data: methods } = useQuery({
+    queryKey: queryKeys.auth.methods,
+    queryFn: () => authApi.getMethods(),
+    retry: false,
+    staleTime: Infinity,
+  });
+  const oidc = methods?.oidc ?? null;
+  const passwordSignIn = methods?.password.signIn ?? true;
+  const passwordSignUp = methods?.password.signUp ?? true;
+  const showPasswordForm = passwordSignIn || showPasswordFallback || mode === "sign_up";
+
+  const ssoMutation = useMutation({
+    mutationFn: async () => {
+      if (!oidc) return;
+      await authApi.signInOidc({
+        providerId: oidc.providerId,
+        callbackURL: nextPath,
+        errorCallbackURL: `/auth?next=${encodeURIComponent(nextPath)}`,
+      });
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Single sign-on failed");
+    },
   });
 
   useEffect(() => {
@@ -86,11 +124,38 @@ export function AuthPage() {
             {mode === "sign_in" ? "Sign in to Paperclip" : "Create your Paperclip account"}
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            {mode === "sign_in"
-              ? "Use your email and password to access this instance."
-              : "Create an account for this instance. Email confirmation is not required in v1."}
+            {mode === "sign_up"
+              ? "Create an account for this instance. Email confirmation is not required in v1."
+              : oidc
+                ? `Sign in with your ${oidc.label} account to access this instance.`
+                : "Use your email and password to access this instance."}
           </p>
 
+          {oidc && mode === "sign_in" && (
+            <div className="mt-6 space-y-3">
+              <Button
+                type="button"
+                className="w-full"
+                disabled={ssoMutation.isPending}
+                onClick={() => {
+                  setError(null);
+                  ssoMutation.mutate();
+                }}
+              >
+                {ssoMutation.isPending ? "Redirecting…" : `Sign in with ${oidc.label}`}
+              </Button>
+              {!showPasswordForm && error && <p className="text-xs text-destructive">{error}</p>}
+              {passwordSignIn && (
+                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                  <div className="h-px flex-1 bg-border" />
+                  or
+                  <div className="h-px flex-1 bg-border" />
+                </div>
+              )}
+            </div>
+          )}
+
+          {showPasswordForm && (
           <form
             className="mt-6 space-y-4"
             method="post"
@@ -158,7 +223,22 @@ export function AuthPage() {
                   : "Create Account"}
             </Button>
           </form>
+          )}
 
+          {oidc && !passwordSignIn && !showPasswordFallback && (
+            <button
+              type="button"
+              className="mt-5 text-xs text-muted-foreground underline underline-offset-2"
+              onClick={() => {
+                setError(null);
+                setShowPasswordFallback(true);
+              }}
+            >
+              Emergency access
+            </button>
+          )}
+
+          {passwordSignUp && (
           <div className="mt-5 text-sm text-muted-foreground">
             {mode === "sign_in" ? "Need an account?" : "Already have an account?"}{" "}
             <button
@@ -172,6 +252,7 @@ export function AuthPage() {
               {mode === "sign_in" ? "Create one" : "Sign in"}
             </button>
           </div>
+          )}
         </div>
       </div>
 

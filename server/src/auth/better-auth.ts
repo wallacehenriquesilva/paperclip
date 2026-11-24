@@ -3,7 +3,8 @@ import type { IncomingHttpHeaders } from "node:http";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
+import { genericOAuth } from "better-auth/plugins";
 import type { Db } from "@paperclipai/db";
 import {
   authAccounts,
@@ -13,6 +14,12 @@ import {
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
+import {
+  assertPasswordSignInAllowed,
+  buildOidcProviderConfig,
+  isOidcCallbackContext,
+  provisionSsoUserMembership,
+} from "./oidc.js";
 
 export type BetterAuthSessionUser = {
   id: string;
@@ -134,6 +141,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
   }
   const publicUrl = process.env.PAPERCLIP_PUBLIC_URL ?? baseUrl;
   const isHttpOnly = publicUrl ? publicUrl.startsWith("http://") : false;
+  const oidc = config.authOidc ?? null;
 
   const authConfig = {
     baseURL: baseUrl,
@@ -153,6 +161,37 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       requireEmailVerification: false,
       disableSignUp: config.authDisableSignUp,
     },
+    ...(oidc
+      ? {
+          plugins: [genericOAuth({ config: [buildOidcProviderConfig(oidc, config.authAllowedEmailDomains)] })],
+          account: {
+            // Existing password users sign in with SSO into the same user row.
+            // Safe because the provider is a single organization IdP and the
+            // id_token is verified (iss/aud/hd/domain) before lookup.
+            accountLinking: {
+              enabled: true,
+              trustedProviders: [oidc.providerId],
+              allowDifferentEmails: false,
+            },
+            encryptOAuthTokens: true,
+          },
+          // OAuth callback failures redirect here as /auth?error=<code>.
+          onAPIError: { errorURL: "/auth" },
+        }
+      : {}),
+    ...(config.authSessionTtlHours
+      ? { session: { expiresIn: Math.round(config.authSessionTtlHours * 3600) } }
+      : {}),
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        assertPasswordSignInAllowed({
+          path: ctx.path,
+          body: ctx.body,
+          passwordLogin: config.authPasswordLogin ?? "enabled",
+          breakGlassEmails: config.authBreakGlassEmails ?? [],
+        });
+      }),
+    },
     databaseHooks: {
       user: {
         create: {
@@ -165,6 +204,11 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
                 code: EMAIL_DOMAIN_NOT_ALLOWED_CODE,
                 message: EMAIL_DOMAIN_NOT_ALLOWED_MESSAGE,
               });
+            }
+          },
+          after: async (user: { id: string }, ctx: unknown) => {
+            if (oidc && isOidcCallbackContext(ctx, oidc.providerId)) {
+              await provisionSsoUserMembership(db, oidc, user.id);
             }
           },
         },

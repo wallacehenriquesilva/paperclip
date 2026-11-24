@@ -133,6 +133,7 @@ export const queryKeys = {
   },
   auth: {
     session: ["auth", "session"] as const,
+    methods: ["auth", "methods"] as const,
   },
   sidebarPreferences: {
     companyOrder: (userId: string) => ["sidebar-preferences", "company-order", userId] as const,

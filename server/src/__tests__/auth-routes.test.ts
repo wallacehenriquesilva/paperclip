@@ -162,3 +162,32 @@ describe.sequential("auth routes", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("GET /api/auth/methods", () => {
+  function appWith(authMethods?: Parameters<typeof authRoutes>[1]["authMethods"]) {
+    const app = express();
+    app.use((req, _res, next) => {
+      req.actor = { type: "none", source: "none" } as Express.Request["actor"];
+      next();
+    });
+    app.use("/api/auth", authRoutes({} as any, { authMethods }));
+    app.use(errorHandler);
+    return app;
+  }
+
+  it("defaults to password-only without a session", async () => {
+    const res = await request(appWith()).get("/api/auth/methods");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ password: { signIn: true, signUp: true }, oidc: null });
+  });
+
+  it("exposes only the provider id and label for SSO", async () => {
+    const res = await request(
+      appWith({ password: { signIn: false, signUp: false }, oidc: { providerId: "oidc", label: "Google" } }),
+    ).get("/api/auth/methods");
+    expect(res.body).toEqual({
+      password: { signIn: false, signUp: false },
+      oidc: { providerId: "oidc", label: "Google" },
+    });
+  });
+});

@@ -1,5 +1,7 @@
 import {
+  authMethodsSchema,
   authSessionSchema,
+  type AuthMethods,
   currentUserProfileSchema,
   type AuthSession,
   type CurrentUserProfile,
@@ -103,6 +105,35 @@ export const authApi = {
     if (direct) return direct;
     const nested = payload && typeof payload === "object" ? toSession((payload as Record<string, unknown>).data) : null;
     return nested;
+  },
+
+  getMethods: async (): Promise<AuthMethods> => {
+    const res = await fetch("/api/auth/methods", {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to load sign-in methods (${res.status})`);
+    }
+    return authMethodsSchema.parse(await res.json());
+  },
+
+  /**
+   * Starts the SSO redirect. `callbackURL`/`errorCallbackURL` must be
+   * same-origin relative paths. `requestSignUp` lets an invite flow create the
+   * user when implicit sign-up is disabled for the provider.
+   */
+  signInOidc: async (input: {
+    providerId: string;
+    callbackURL: string;
+    errorCallbackURL: string;
+    requestSignUp?: boolean;
+  }) => {
+    const payload = (await authPost("/sign-in/oauth2", input)) as { url?: unknown } | null;
+    if (!payload || typeof payload.url !== "string") {
+      throw new Error("Single sign-on did not return a redirect URL");
+    }
+    window.location.assign(payload.url);
   },
 
   signInEmail: async (input: { email: string; password: string }) => {

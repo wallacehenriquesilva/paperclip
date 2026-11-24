@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { resolvePaperclipEnvPath } from "./paths.js";
 import { maybeRepairLegacyWorktreeConfigAndEnvFiles } from "./worktree-config.js";
+import { parseAuthSsoSettings, type AuthSsoSettings } from "./auth/oidc-config.js";
 import {
   AUTH_BASE_URL_MODES,
   BIND_MODES,
@@ -49,7 +50,7 @@ const TAILSCALE_DETECT_TIMEOUT_MS = 3000;
 
 type DatabaseMode = "embedded-postgres" | "postgres";
 
-export interface Config {
+export interface Config extends Partial<AuthSsoSettings> {
   deploymentMode: DeploymentMode;
   deploymentExposure: DeploymentExposure;
   bind: BindMode;
@@ -325,6 +326,7 @@ export function loadConfig(): Config {
     authPublicBaseUrl,
     authDisableSignUp,
     authAllowedEmailDomains,
+    ...parseAuthSsoSettings(process.env),
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
