@@ -513,6 +513,15 @@ export async function startServer(): Promise<StartedServer> {
           derived: derivedTrustedOrigins.length,
           env: envTrustedOrigins.length,
         },
+        sso: {
+          oidcEnabled: Boolean(config.authOidc),
+          providerId: config.authOidc?.providerId ?? null,
+          requiredHostedDomain: config.authOidc?.requiredHostedDomain ?? null,
+          autoProvision: config.authOidc?.autoProvision ?? null,
+          defaultCompanyId: config.authOidc?.defaultCompanyId ?? null,
+          passwordLogin: config.authPasswordLogin ?? "enabled",
+          breakGlassAccounts: config.authBreakGlassEmails?.length ?? 0,
+        },
       },
       "Authenticated mode auth origin configuration",
     );
@@ -619,6 +628,15 @@ export async function startServer(): Promise<StartedServer> {
     companyDeletionEnabled: config.companyDeletionEnabled,
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
+    authMethods: {
+      password: {
+        signIn: config.authPasswordLogin !== "disabled",
+        signUp: config.authPasswordLogin !== "disabled" && !config.authDisableSignUp,
+      },
+      oidc: config.deploymentMode === "authenticated" && config.authOidc
+        ? { providerId: config.authOidc.providerId, label: config.authOidc.label }
+        : null,
+    },
     resolveSession,
     pluginWorkerManager,
   });

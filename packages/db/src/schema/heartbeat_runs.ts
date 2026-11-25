@@ -99,5 +99,20 @@ export const heartbeatRuns = pgTable(
     companyContextIssueIdIdx: index("heartbeat_runs_company_context_issue_id_idx")
       .on(table.companyId, sql`((${table.contextSnapshot} ->> 'issueId'))`)
       .where(sql`(${table.contextSnapshot} ->> 'issueId') is not null`),
+    // Latest run(s) per issue as a single backward index probe (recovery job,
+    // issue run lists). Without created_at/id in the key Postgres reads every
+    // run of the issue and sorts.
+    companyIssueCreatedIdx: index("heartbeat_runs_company_issue_created_idx")
+      .on(
+        table.companyId,
+        sql`((${table.contextSnapshot} ->> 'issueId'))`,
+        table.createdAt.desc(),
+        table.id.desc(),
+      )
+      .where(sql`(${table.contextSnapshot} ->> 'issueId') is not null`),
+    // Runs of an agent session, newest first.
+    agentSessionAfterCreatedIdx: index("heartbeat_runs_agent_session_after_created_idx")
+      .on(table.agentId, table.sessionIdAfter, table.createdAt.desc())
+      .where(sql`${table.sessionIdAfter} is not null`),
   }),
 );

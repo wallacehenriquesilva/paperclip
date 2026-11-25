@@ -195,6 +195,22 @@ export const currentUserProfileSchema = z.object({
 
 export type CurrentUserProfile = z.infer<typeof currentUserProfileSchema>;
 
+/** Public description of the sign-in methods offered by this instance. Never includes secrets. */
+export const authMethodsSchema = z.object({
+  password: z.object({
+    signIn: z.boolean(),
+    signUp: z.boolean(),
+  }),
+  oidc: z
+    .object({
+      providerId: z.string().min(1),
+      label: z.string().min(1),
+    })
+    .nullable(),
+});
+
+export type AuthMethods = z.infer<typeof authMethodsSchema>;
+
 export const authSessionSchema = z.object({
   session: z.object({
     id: z.string().min(1),

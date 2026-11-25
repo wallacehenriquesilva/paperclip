@@ -3,7 +3,9 @@ import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { authUsers } from "@paperclipai/db";
 import {
+  authMethodsSchema,
   authSessionSchema,
+  type AuthMethods,
   currentUserProfileSchema,
   updateCurrentUserProfileSchema,
 } from "@paperclipai/shared";
@@ -34,8 +36,19 @@ async function loadCurrentUserProfile(db: Db, userId: string) {
   });
 }
 
-export function authRoutes(db: Db) {
+const DEFAULT_AUTH_METHODS: AuthMethods = {
+  password: { signIn: true, signUp: true },
+  oidc: null,
+};
+
+export function authRoutes(db: Db, opts: { authMethods?: AuthMethods } = {}) {
   const router = Router();
+  const authMethods = authMethodsSchema.parse(opts.authMethods ?? DEFAULT_AUTH_METHODS);
+
+  // Public: the sign-in page needs this before any session exists.
+  router.get("/methods", (_req, res) => {
+    res.json(authMethods);
+  });
 
   router.get("/get-session", async (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {

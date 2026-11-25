@@ -729,6 +729,13 @@
       "when": 1793877963565,
       "tag": "0103_activity_log_company_entity_created_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1795541216238,
+      "tag": "0104_heartbeat_runs_lookup_idx",
+      "breakpoints": true
     }
   ]
 }

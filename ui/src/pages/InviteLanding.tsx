@@ -247,6 +247,28 @@ export function InviteLandingPage() {
     retry: false,
   });
 
+  const authMethodsQuery = useQuery({
+    queryKey: queryKeys.auth.methods,
+    queryFn: () => authApi.getMethods(),
+    retry: false,
+    staleTime: Infinity,
+  });
+  const inviteOidc = authMethodsQuery.data?.oidc ?? null;
+  const ssoMutation = useMutation({
+    mutationFn: async () => {
+      if (!inviteOidc) return;
+      // Come back to this invite after the IdP round-trip; the pending token
+      // is remembered so auto-accept fires once the session exists.
+      rememberPendingInviteToken(token);
+      const invitePath = window.location.pathname;
+      await authApi.signInOidc({
+        providerId: inviteOidc.providerId,
+        callbackURL: invitePath,
+        errorCallbackURL: `/auth?next=${encodeURIComponent(invitePath)}`,
+      });
+    },
+  });
+
   const companiesQuery = useQuery({
     queryKey: queryKeys.companies.all,
     queryFn: () => companiesApi.list(),
@@ -663,6 +685,26 @@ export function InviteLandingPage() {
                   </p>
                 </div>
 
+                {inviteOidc && (
+                  <div className="space-y-2">
+                    <Button
+                      type="button"
+                      className="w-full rounded-none"
+                      disabled={ssoMutation.isPending}
+                      onClick={() => ssoMutation.mutate()}
+                    >
+                      {ssoMutation.isPending ? "Redirecting…" : `Continue with ${inviteOidc.label}`}
+                    </Button>
+                    {ssoMutation.error && (
+                      <p className="text-xs text-red-400">
+                        {ssoMutation.error instanceof Error ? ssoMutation.error.message : "Single sign-on failed"}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {(!inviteOidc || authMethodsQuery.data?.password.signIn !== false) && (
+                <>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -782,6 +824,8 @@ export function InviteLandingPage() {
                     ? "Already signed up before? Use the existing-account option instead so the invite lands on the right Paperclip user."
                     : "No account yet? Switch back to create account so you can accept the invite with a new login."}
                 </p>
+                </>
+                )}
               </div>
             ) : (
               <div className="space-y-4">
